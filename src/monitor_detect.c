@@ -27,40 +27,89 @@ MonitorList* monitor_detect_all(void)
     }
     
     char line[512];
-    regex_t regex;
+    regex_t device_regex, name_regex;
     regmatch_t matches[3];
     
-    /* Compile regex to match device lines */
-    if (regcomp(&regex, "dev:(/dev/i2c-[0-9]+)", REG_EXTENDED) != 0) {
-        g_warning("Failed to compile regex");
+    /* Compile regex to match device lines and monitor name lines */
+    if (regcomp(&device_regex, "Device: dev:(/dev/i2c-[0-9]+)", REG_EXTENDED) != 0) {
+        g_warning("Failed to compile device regex");
         pclose(fp);
         return list;
     }
     
+    if (regcomp(&name_regex, "Monitor Name: (.+)", REG_EXTENDED) != 0) {
+        g_warning("Failed to compile name regex");
+        regfree(&device_regex);
+        pclose(fp);
+        return list;
+    }
+    
+    char current_device[64] = "";
+    char current_name[128] = "";
+    gboolean ddc_supported = FALSE;
+    
     while (fgets(line, sizeof(line), fp)) {
-        /* Look for lines containing device paths */
-        if (regexec(&regex, line, 3, matches, 0) == 0) {
-            /* Extract device path */
-            char device_path[64];
-            int len = matches[1].rm_eo - matches[1].rm_so;
-            if (len < sizeof(device_path)) {
-                strncpy(device_path, line + matches[1].rm_so, len);
-                device_path[len] = '\0';
+        /* Remove trailing newline */
+        char *newline = strchr(line, '\n');
+        if (newline) *newline = '\0';
+        
+        /* Look for device path */
+        if (regexec(&device_regex, line, 3, matches, 0) == 0) {
+            /* If we have a previous monitor with DDC support, add it */
+            if (strlen(current_device) > 0 && ddc_supported) {
+                char display_name[256];
+                if (strlen(current_name) > 0) {
+                    snprintf(display_name, sizeof(display_name), "%s (%s)", current_name, current_device);
+                } else {
+                    snprintf(display_name, sizeof(display_name), "Monitor (%s)", current_device);
+                }
                 
-                /* Create display name from device path */
-                char display_name[128];
-                snprintf(display_name, sizeof(display_name), "Monitor (%s)", device_path);
-                
-                /* Create monitor and add to list */
-                Monitor *monitor = monitor_new(device_path, display_name);
+                Monitor *monitor = monitor_new(current_device, display_name);
                 monitor_list_add(list, monitor);
-                
-                g_message("Found monitor: %s", device_path);
+                g_message("Found monitor: %s", current_device);
+            }
+            
+            /* Extract new device path */
+            int len = matches[1].rm_eo - matches[1].rm_so;
+            if (len < sizeof(current_device)) {
+                strncpy(current_device, line + matches[1].rm_so, len);
+                current_device[len] = '\0';
+                current_name[0] = '\0';  /* Reset name */
+                ddc_supported = FALSE;   /* Reset DDC support flag */
+            }
+        }
+        
+        /* Look for DDC/CI support */
+        if (strstr(line, "DDC/CI supported: Yes")) {
+            ddc_supported = TRUE;
+        }
+        
+        /* Look for monitor name */
+        if (regexec(&name_regex, line, 3, matches, 0) == 0) {
+            int len = matches[1].rm_eo - matches[1].rm_so;
+            if (len < sizeof(current_name)) {
+                strncpy(current_name, line + matches[1].rm_so, len);
+                current_name[len] = '\0';
             }
         }
     }
     
-    regfree(&regex);
+    /* Add the last monitor if it has DDC support */
+    if (strlen(current_device) > 0 && ddc_supported) {
+        char display_name[256];
+        if (strlen(current_name) > 0) {
+            snprintf(display_name, sizeof(display_name), "%s (%s)", current_name, current_device);
+        } else {
+            snprintf(display_name, sizeof(display_name), "Monitor (%s)", current_device);
+        }
+        
+        Monitor *monitor = monitor_new(current_device, display_name);
+        monitor_list_add(list, monitor);
+        g_message("Found monitor: %s", current_device);
+    }
+    
+    regfree(&device_regex);
+    regfree(&name_regex);
     pclose(fp);
     
     if (monitor_list_get_count(list) == 0) {
