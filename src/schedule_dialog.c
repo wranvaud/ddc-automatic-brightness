@@ -34,6 +34,8 @@ static void on_add_clicked(GtkButton *button, ScheduleDialogData *data);
 static void on_remove_clicked(GtkButton *button, ScheduleDialogData *data);
 static void on_save_clicked(GtkButton *button, ScheduleDialogData *data);
 static void on_cancel_clicked(GtkButton *button, ScheduleDialogData *data);
+static void on_time_edited(GtkCellRendererText *renderer, gchar *path, gchar *new_text, ScheduleDialogData *data);
+static void on_brightness_edited(GtkCellRendererText *renderer, gchar *path, gchar *new_text, ScheduleDialogData *data);
 
 /* Show schedule configuration dialog */
 void show_schedule_dialog(GtkWidget *parent, BrightnessScheduler *scheduler, AppConfig *config)
@@ -48,7 +50,7 @@ void show_schedule_dialog(GtkWidget *parent, BrightnessScheduler *scheduler, App
                                               GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT,
                                               (const gchar*)NULL);
     
-    gtk_window_set_default_size(GTK_WINDOW(data->dialog), 600, 600);
+    gtk_window_set_default_size(GTK_WINDOW(data->dialog), 400, 400);
     
     /* Get dialog content area */
     GtkWidget *content_area = gtk_dialog_get_content_area(GTK_DIALOG(data->dialog));
@@ -84,11 +86,13 @@ void show_schedule_dialog(GtkWidget *parent, BrightnessScheduler *scheduler, App
     
     /* Time column */
     renderer = gtk_cell_renderer_text_new();
+    g_object_set(renderer, "editable", TRUE, NULL);
     column = gtk_tree_view_column_new_with_attributes("Time", renderer,
                                                      "text", COL_TIME_STR,
                                                      NULL);
     gtk_tree_view_column_set_min_width(column, 80);
     gtk_tree_view_append_column(GTK_TREE_VIEW(data->schedule_list), column);
+    g_signal_connect(renderer, "edited", G_CALLBACK(on_time_edited), data);
     
     /* Brightness column */
     renderer = gtk_cell_renderer_text_new();
@@ -98,6 +102,7 @@ void show_schedule_dialog(GtkWidget *parent, BrightnessScheduler *scheduler, App
                                                      NULL);
     gtk_tree_view_column_set_min_width(column, 120);
     gtk_tree_view_append_column(GTK_TREE_VIEW(data->schedule_list), column);
+    g_signal_connect(renderer, "edited", G_CALLBACK(on_brightness_edited), data);
     
     /* Scrolled window for list */
     GtkWidget *scrolled = gtk_scrolled_window_new(NULL, NULL);
@@ -106,8 +111,7 @@ void show_schedule_dialog(GtkWidget *parent, BrightnessScheduler *scheduler, App
                                   GTK_POLICY_AUTOMATIC);
     gtk_scrolled_window_set_shadow_type(GTK_SCROLLED_WINDOW(scrolled), GTK_SHADOW_IN);
     
-    /* Set minimum size to show at least 10 schedule entries (about 300px) */
-    gtk_widget_set_size_request(scrolled, -1, 300);
+    /* Let the schedule list expand to fill available space */
     
     gtk_container_add(GTK_CONTAINER(scrolled), data->schedule_list);
     gtk_container_add(GTK_CONTAINER(list_frame), scrolled);
@@ -295,4 +299,161 @@ static void on_save_clicked(GtkButton *button, ScheduleDialogData *data)
 static void on_cancel_clicked(GtkButton *button, ScheduleDialogData *data)
 {
     gtk_dialog_response(GTK_DIALOG(data->dialog), GTK_RESPONSE_CANCEL);
+}
+
+/* Time cell edited */
+static void on_time_edited(GtkCellRendererText *renderer, gchar *path, gchar *new_text, ScheduleDialogData *data)
+{
+    (void)renderer; /* Suppress unused parameter warning */
+    
+    GtkTreeIter iter;
+    GtkTreePath *tree_path = gtk_tree_path_new_from_string(path);
+    
+    if (gtk_tree_model_get_iter(GTK_TREE_MODEL(data->list_store), &iter, tree_path)) {
+        int old_hour, old_minute, brightness;
+        
+        /* Get current values */
+        gtk_tree_model_get(GTK_TREE_MODEL(data->list_store), &iter,
+                          COL_HOUR, &old_hour,
+                          COL_MINUTE, &old_minute,
+                          COL_BRIGHTNESS, &brightness,
+                          -1);
+        
+        /* Parse new time (expect format like "14:30" or "14h30" or just "14") */
+        int new_hour = -1, new_minute = 0;
+        
+        if (strchr(new_text, ':')) {
+            /* Format: HH:MM */
+            if (sscanf(new_text, "%d:%d", &new_hour, &new_minute) < 1) {
+                new_hour = -1;
+            }
+        } else if (strchr(new_text, 'h')) {
+            /* Format: HHhMM or HHh */
+            if (sscanf(new_text, "%dh%d", &new_hour, &new_minute) < 1) {
+                if (sscanf(new_text, "%dh", &new_hour) < 1) {
+                    new_hour = -1;
+                }
+            }
+        } else {
+            /* Format: just hour */
+            if (sscanf(new_text, "%d", &new_hour) < 1) {
+                new_hour = -1;
+            }
+        }
+        
+        /* Validate time */
+        if (new_hour < 0 || new_hour > 23 || new_minute < 0 || new_minute > 59) {
+            GtkWidget *dialog = gtk_message_dialog_new(GTK_WINDOW(data->dialog),
+                                                      GTK_DIALOG_MODAL,
+                                                      GTK_MESSAGE_ERROR,
+                                                      GTK_BUTTONS_OK,
+                                                      "Invalid time format. Use HH:MM, HHhMM, or HH format (0-23 hours, 0-59 minutes).");
+            gtk_dialog_run(GTK_DIALOG(dialog));
+            gtk_widget_destroy(dialog);
+            gtk_tree_path_free(tree_path);
+            return;
+        }
+        
+        /* Check for duplicate time */
+        GtkTreeIter check_iter;
+        gboolean valid = gtk_tree_model_get_iter_first(GTK_TREE_MODEL(data->list_store), &check_iter);
+        GtkTreePath *current_path = gtk_tree_model_get_path(GTK_TREE_MODEL(data->list_store), &iter);
+        
+        while (valid) {
+            GtkTreePath *check_path = gtk_tree_model_get_path(GTK_TREE_MODEL(data->list_store), &check_iter);
+            
+            /* Skip if this is the same row we're editing */
+            if (gtk_tree_path_compare(current_path, check_path) != 0) {
+                int check_hour, check_minute;
+                gtk_tree_model_get(GTK_TREE_MODEL(data->list_store), &check_iter,
+                                  COL_HOUR, &check_hour,
+                                  COL_MINUTE, &check_minute,
+                                  -1);
+                
+                if (check_hour == new_hour && check_minute == new_minute) {
+                    GtkWidget *dialog = gtk_message_dialog_new(GTK_WINDOW(data->dialog),
+                                                              GTK_DIALOG_MODAL,
+                                                              GTK_MESSAGE_WARNING,
+                                                              GTK_BUTTONS_OK,
+                                                              "Time %02d:%02d is already in the schedule.",
+                                                              new_hour, new_minute);
+                    gtk_dialog_run(GTK_DIALOG(dialog));
+                    gtk_widget_destroy(dialog);
+                    gtk_tree_path_free(check_path);
+                    gtk_tree_path_free(current_path);
+                    gtk_tree_path_free(tree_path);
+                    return;
+                }
+            }
+            
+            gtk_tree_path_free(check_path);
+            valid = gtk_tree_model_iter_next(GTK_TREE_MODEL(data->list_store), &check_iter);
+        }
+        
+        gtk_tree_path_free(current_path);
+        
+        /* Remove old time from scheduler */
+        scheduler_remove_time(data->scheduler, old_hour, old_minute);
+        
+        /* Add new time to scheduler */
+        scheduler_add_time(data->scheduler, new_hour, new_minute, brightness);
+        
+        /* Update display */
+        char time_str[16];
+        snprintf(time_str, sizeof(time_str), "%02d:%02d", new_hour, new_minute);
+        
+        gtk_list_store_set(data->list_store, &iter,
+                          COL_TIME_STR, time_str,
+                          COL_HOUR, new_hour,
+                          COL_MINUTE, new_minute,
+                          -1);
+        
+        /* Refresh the entire list to maintain sort order */
+        refresh_schedule_list(data);
+    }
+    
+    gtk_tree_path_free(tree_path);
+}
+
+/* Brightness cell edited */
+static void on_brightness_edited(GtkCellRendererText *renderer, gchar *path, gchar *new_text, ScheduleDialogData *data)
+{
+    (void)renderer; /* Suppress unused parameter warning */
+    
+    GtkTreeIter iter;
+    GtkTreePath *tree_path = gtk_tree_path_new_from_string(path);
+    
+    if (gtk_tree_model_get_iter(GTK_TREE_MODEL(data->list_store), &iter, tree_path)) {
+        int hour, minute;
+        int new_brightness;
+        
+        /* Get current time values */
+        gtk_tree_model_get(GTK_TREE_MODEL(data->list_store), &iter,
+                          COL_HOUR, &hour,
+                          COL_MINUTE, &minute,
+                          -1);
+        
+        /* Parse new brightness */
+        if (sscanf(new_text, "%d", &new_brightness) != 1 || new_brightness < 0 || new_brightness > 100) {
+            GtkWidget *dialog = gtk_message_dialog_new(GTK_WINDOW(data->dialog),
+                                                      GTK_DIALOG_MODAL,
+                                                      GTK_MESSAGE_ERROR,
+                                                      GTK_BUTTONS_OK,
+                                                      "Invalid brightness value. Must be between 0 and 100.");
+            gtk_dialog_run(GTK_DIALOG(dialog));
+            gtk_widget_destroy(dialog);
+            gtk_tree_path_free(tree_path);
+            return;
+        }
+        
+        /* Update scheduler */
+        scheduler_add_time(data->scheduler, hour, minute, new_brightness);
+        
+        /* Update display */
+        gtk_list_store_set(data->list_store, &iter,
+                          COL_BRIGHTNESS, new_brightness,
+                          -1);
+    }
+    
+    gtk_tree_path_free(tree_path);
 }
