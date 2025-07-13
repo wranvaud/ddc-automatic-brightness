@@ -50,7 +50,8 @@ void show_schedule_dialog(GtkWidget *parent, BrightnessScheduler *scheduler, App
                                               GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT,
                                               (const gchar*)NULL);
     
-    gtk_window_set_default_size(GTK_WINDOW(data->dialog), 400, 400);
+    gtk_window_set_default_size(GTK_WINDOW(data->dialog), 240, 350);
+    gtk_window_set_resizable(GTK_WINDOW(data->dialog), TRUE);
     
     /* Get dialog content area */
     GtkWidget *content_area = gtk_dialog_get_content_area(GTK_DIALOG(data->dialog));
@@ -60,13 +61,10 @@ void show_schedule_dialog(GtkWidget *parent, BrightnessScheduler *scheduler, App
     GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
     gtk_container_add(GTK_CONTAINER(content_area), vbox);
     
-    /* Title label */
-    GtkWidget *title_label = gtk_label_new(NULL);
-    gtk_label_set_markup(GTK_LABEL(title_label), "<b>Brightness Schedule Configuration</b>");
-    gtk_box_pack_start(GTK_BOX(vbox), title_label, FALSE, FALSE, 0);
-    
-    /* Schedule list frame */
+    /* Schedule list frame - expandable */
     GtkWidget *list_frame = gtk_frame_new("Schedule Times");
+    gtk_widget_set_vexpand(list_frame, TRUE);
+    gtk_widget_set_hexpand(list_frame, TRUE);
     gtk_box_pack_start(GTK_BOX(vbox), list_frame, TRUE, TRUE, 0);
     
     /* Create list store */
@@ -79,6 +77,8 @@ void show_schedule_dialog(GtkWidget *parent, BrightnessScheduler *scheduler, App
     /* Create tree view */
     data->schedule_list = gtk_tree_view_new_with_model(GTK_TREE_MODEL(data->list_store));
     gtk_tree_view_set_headers_visible(GTK_TREE_VIEW(data->schedule_list), TRUE);
+    gtk_widget_set_vexpand(data->schedule_list, TRUE);
+    gtk_widget_set_hexpand(data->schedule_list, TRUE);
     
     /* Add columns */
     GtkCellRenderer *renderer;
@@ -111,52 +111,67 @@ void show_schedule_dialog(GtkWidget *parent, BrightnessScheduler *scheduler, App
                                   GTK_POLICY_AUTOMATIC);
     gtk_scrolled_window_set_shadow_type(GTK_SCROLLED_WINDOW(scrolled), GTK_SHADOW_IN);
     
-    /* Set minimum height to show about 8-10 schedule entries in 400x400 dialog */
-    gtk_widget_set_size_request(scrolled, -1, 200);
+    /* Set minimum height to clearly show 5 schedule entries by default, but allow expansion */
+    gtk_widget_set_size_request(scrolled, -1, 150);
+    gtk_widget_set_vexpand(scrolled, TRUE);
+    gtk_widget_set_hexpand(scrolled, TRUE);
     
     gtk_container_add(GTK_CONTAINER(scrolled), data->schedule_list);
     gtk_container_add(GTK_CONTAINER(list_frame), scrolled);
     
-    /* Add/Remove controls frame */
+    /* Remove button below the list - fixed at bottom */
+    GtkWidget *remove_hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
+    gtk_box_pack_start(GTK_BOX(vbox), remove_hbox, FALSE, FALSE, 5);
+    
+    GtkWidget *remove_button = gtk_button_new_with_label("Remove Selected");
+    gtk_box_pack_start(GTK_BOX(remove_hbox), remove_button, FALSE, FALSE, 0);
+    g_signal_connect(remove_button, "clicked", G_CALLBACK(on_remove_clicked), data);
+    
+    /* Add controls frame - fixed at bottom */
     GtkWidget *controls_frame = gtk_frame_new("Add Schedule Time");
     gtk_box_pack_start(GTK_BOX(vbox), controls_frame, FALSE, FALSE, 0);
     
-    GtkWidget *controls_hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
-    gtk_container_set_border_width(GTK_CONTAINER(controls_hbox), 10);
-    gtk_container_add(GTK_CONTAINER(controls_frame), controls_hbox);
+    GtkWidget *controls_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
+    gtk_container_set_border_width(GTK_CONTAINER(controls_vbox), 10);
+    gtk_container_add(GTK_CONTAINER(controls_frame), controls_vbox);
     
-    /* Time input */
-    gtk_box_pack_start(GTK_BOX(controls_hbox), gtk_label_new("Time:"), FALSE, FALSE, 0);
+    /* Time input line */
+    GtkWidget *time_hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
+    gtk_box_pack_start(GTK_BOX(controls_vbox), time_hbox, FALSE, FALSE, 0);
+    
+    gtk_box_pack_start(GTK_BOX(time_hbox), gtk_label_new("Time:"), FALSE, FALSE, 0);
     
     data->hour_spin = gtk_spin_button_new_with_range(0, 23, 1);
     gtk_spin_button_set_value(GTK_SPIN_BUTTON(data->hour_spin), 12);
-    gtk_box_pack_start(GTK_BOX(controls_hbox), data->hour_spin, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(time_hbox), data->hour_spin, FALSE, FALSE, 0);
     
-    gtk_box_pack_start(GTK_BOX(controls_hbox), gtk_label_new("h"), FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(time_hbox), gtk_label_new("h"), FALSE, FALSE, 0);
     
     data->minute_spin = gtk_spin_button_new_with_range(0, 59, 1);
     gtk_spin_button_set_value(GTK_SPIN_BUTTON(data->minute_spin), 0);
-    gtk_box_pack_start(GTK_BOX(controls_hbox), data->minute_spin, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(time_hbox), data->minute_spin, FALSE, FALSE, 0);
     
-    gtk_box_pack_start(GTK_BOX(controls_hbox), gtk_label_new("m"), FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(time_hbox), gtk_label_new("m"), FALSE, FALSE, 0);
     
-    /* Brightness input */
-    gtk_box_pack_start(GTK_BOX(controls_hbox), gtk_label_new("Brightness:"), FALSE, FALSE, 0);
+    /* Brightness input line */
+    GtkWidget *brightness_hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
+    gtk_box_pack_start(GTK_BOX(controls_vbox), brightness_hbox, FALSE, FALSE, 0);
+    
+    gtk_box_pack_start(GTK_BOX(brightness_hbox), gtk_label_new("Brightness:"), FALSE, FALSE, 0);
     
     data->brightness_spin = gtk_spin_button_new_with_range(0, 100, 1);
     gtk_spin_button_set_value(GTK_SPIN_BUTTON(data->brightness_spin), 50);
-    gtk_box_pack_start(GTK_BOX(controls_hbox), data->brightness_spin, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(brightness_hbox), data->brightness_spin, FALSE, FALSE, 0);
     
-    gtk_box_pack_start(GTK_BOX(controls_hbox), gtk_label_new("%"), FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(brightness_hbox), gtk_label_new("%"), FALSE, FALSE, 0);
     
-    /* Add/Remove buttons */
+    /* Add button line */
+    GtkWidget *button_hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
+    gtk_box_pack_start(GTK_BOX(controls_vbox), button_hbox, FALSE, FALSE, 0);
+    
     GtkWidget *add_button = gtk_button_new_with_label("Add");
-    gtk_box_pack_start(GTK_BOX(controls_hbox), add_button, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(button_hbox), add_button, FALSE, FALSE, 0);
     g_signal_connect(add_button, "clicked", G_CALLBACK(on_add_clicked), data);
-    
-    GtkWidget *remove_button = gtk_button_new_with_label("Remove Selected");
-    gtk_box_pack_start(GTK_BOX(controls_hbox), remove_button, FALSE, FALSE, 0);
-    g_signal_connect(remove_button, "clicked", G_CALLBACK(on_remove_clicked), data);
     
     /* Dialog buttons */
     GtkWidget *save_button = gtk_button_new_with_label("Save");
