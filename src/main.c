@@ -360,9 +360,12 @@ static void setup_ui(void)
     gtk_container_set_border_width(GTK_CONTAINER(vbox), 10);
     gtk_container_add(GTK_CONTAINER(app_data.main_window), vbox);
     
+    /* Store reference to main vbox for sibling frames */
+    GtkWidget *main_vbox = vbox;
+    
     /* Monitor selection frame */
     monitor_frame = gtk_frame_new("Monitor");
-    gtk_box_pack_start(GTK_BOX(vbox), monitor_frame, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(main_vbox), monitor_frame, FALSE, FALSE, 0);
     
     hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
     gtk_container_set_border_width(GTK_CONTAINER(hbox), 10);
@@ -378,7 +381,7 @@ static void setup_ui(void)
     
     /* Brightness control frame */
     brightness_frame = gtk_frame_new("Brightness Control");
-    gtk_box_pack_start(GTK_BOX(vbox), brightness_frame, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(main_vbox), brightness_frame, FALSE, FALSE, 0);
     
     vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
     gtk_container_set_border_width(GTK_CONTAINER(vbox), 10);
@@ -395,7 +398,7 @@ static void setup_ui(void)
     
     /* Auto brightness frame */
     auto_frame = gtk_frame_new("Automatic Brightness");
-    gtk_box_pack_start(GTK_BOX(vbox), auto_frame, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(main_vbox), auto_frame, FALSE, FALSE, 0);
     
     vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
     gtk_container_set_border_width(GTK_CONTAINER(vbox), 10);
@@ -412,9 +415,8 @@ static void setup_ui(void)
                      G_CALLBACK(on_schedule_clicked), NULL);
     
     /* Startup options frame */
-#if HAVE_APPINDICATOR
     GtkWidget *startup_frame = gtk_frame_new("Startup Options");
-    gtk_box_pack_start(GTK_BOX(vbox), startup_frame, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(main_vbox), startup_frame, FALSE, FALSE, 0);
     
     GtkWidget *startup_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
     gtk_container_set_border_width(GTK_CONTAINER(startup_vbox), 10);
@@ -426,12 +428,11 @@ static void setup_ui(void)
     gtk_box_pack_start(GTK_BOX(startup_vbox), app_data.start_minimized_check, FALSE, FALSE, 0);
     g_signal_connect(app_data.start_minimized_check, "toggled", 
                      G_CALLBACK(on_start_minimized_toggled), NULL);
-#endif
     
     /* Button frame */
     button_frame = gtk_frame_new(NULL);
     gtk_frame_set_shadow_type(GTK_FRAME(button_frame), GTK_SHADOW_NONE);
-    gtk_box_pack_start(GTK_BOX(vbox), button_frame, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(main_vbox), button_frame, FALSE, FALSE, 0);
     
     hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
     gtk_container_add(GTK_CONTAINER(button_frame), hbox);
