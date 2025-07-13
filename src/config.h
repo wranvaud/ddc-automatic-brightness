@@ -29,6 +29,9 @@ void config_set_auto_brightness_enabled(AppConfig *config, gboolean enabled);
 gboolean config_get_start_minimized(AppConfig *config);
 void config_set_start_minimized(AppConfig *config, gboolean minimized);
 
+gboolean config_get_show_brightness_in_tray(AppConfig *config);
+void config_set_show_brightness_in_tray(AppConfig *config, gboolean show);
+
 /* Per-monitor settings */
 gboolean config_get_monitor_auto_brightness(AppConfig *config, const char *device_path);
 void config_set_monitor_auto_brightness(AppConfig *config, const char *device_path, gboolean enabled);

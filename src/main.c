@@ -39,6 +39,7 @@ typedef struct {
     GtkWidget *auto_brightness_check;
     GtkWidget *schedule_button;
     GtkWidget *start_minimized_check;
+    GtkWidget *show_brightness_tray_check;
     
     MonitorList *monitors;
     Monitor *current_monitor;
@@ -65,6 +66,7 @@ static void on_auto_brightness_toggled(GtkToggleButton *button, gpointer data);
 static void on_schedule_clicked(GtkButton *button, gpointer data);
 static void on_refresh_monitors_clicked(GtkButton *button, gpointer data);
 static void on_start_minimized_toggled(GtkToggleButton *button, gpointer data);
+static void on_show_brightness_tray_toggled(GtkToggleButton *button, gpointer data);
 static gboolean auto_brightness_timer_callback(gpointer data);
 static void setup_ui(void);
 static void load_monitors(void);
@@ -82,6 +84,7 @@ static void on_indicator_auto_brightness_toggle(GtkMenuItem *item, gpointer data
 static void on_indicator_show_window(GtkMenuItem *item, gpointer data);
 static void on_indicator_quit(GtkMenuItem *item, gpointer data);
 static void update_indicator_menu(void);
+static void update_tray_icon_label(void);
 #endif
 
 /* Main entry point */
@@ -415,7 +418,7 @@ static void setup_ui(void)
                      G_CALLBACK(on_schedule_clicked), NULL);
     
     /* Startup options frame */
-    GtkWidget *startup_frame = gtk_frame_new("Startup Options");
+    GtkWidget *startup_frame = gtk_frame_new("Options");
     gtk_box_pack_start(GTK_BOX(main_vbox), startup_frame, FALSE, FALSE, 0);
     
     GtkWidget *startup_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
@@ -428,6 +431,13 @@ static void setup_ui(void)
     gtk_box_pack_start(GTK_BOX(startup_vbox), app_data.start_minimized_check, FALSE, FALSE, 0);
     g_signal_connect(app_data.start_minimized_check, "toggled", 
                      G_CALLBACK(on_start_minimized_toggled), NULL);
+    
+    app_data.show_brightness_tray_check = gtk_check_button_new_with_label("Show brightness level in tray icon");
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app_data.show_brightness_tray_check), 
+                                config_get_show_brightness_in_tray(app_data.config));
+    gtk_box_pack_start(GTK_BOX(startup_vbox), app_data.show_brightness_tray_check, FALSE, FALSE, 0);
+    g_signal_connect(app_data.show_brightness_tray_check, "toggled", 
+                     G_CALLBACK(on_show_brightness_tray_toggled), NULL);
     
     /* Button frame */
     button_frame = gtk_frame_new(NULL);
@@ -509,6 +519,12 @@ static void update_brightness_display(void)
     char text[16];
     snprintf(text, sizeof(text), "%d%%", brightness);
     gtk_label_set_text(GTK_LABEL(app_data.brightness_label), text);
+    
+#if HAVE_APPINDICATOR
+    /* Update tray icon and menu */
+    update_tray_icon_label();
+    update_indicator_menu();
+#endif
 }
 
 /* Window delete event handler */
@@ -534,6 +550,22 @@ static void on_start_minimized_toggled(GtkToggleButton *button, gpointer data)
     gboolean enabled = gtk_toggle_button_get_active(button);
     config_set_start_minimized(app_data.config, enabled);
     config_save(app_data.config);
+}
+
+/* Show brightness in tray checkbox toggled */
+static void on_show_brightness_tray_toggled(GtkToggleButton *button, gpointer data)
+{
+    (void)data;
+    gboolean enabled = gtk_toggle_button_get_active(button);
+    config_set_show_brightness_in_tray(app_data.config, enabled);
+    config_save(app_data.config);
+    
+#if HAVE_APPINDICATOR
+    /* Update tray icon label immediately */
+    update_tray_icon_label();
+    /* Update indicator menu to show/hide brightness */
+    update_indicator_menu();
+#endif
 }
 
 #if HAVE_APPINDICATOR
@@ -725,18 +757,53 @@ static void on_indicator_quit(GtkMenuItem *item, gpointer data)
     gtk_main_quit();
 }
 
+static void update_tray_icon_label(void)
+{
+    if (!app_data.indicator) {
+        return;
+    }
+    
+    gboolean show_brightness = config_get_show_brightness_in_tray(app_data.config);
+    
+    if (show_brightness && app_data.current_monitor) {
+        /* Show brightness percentage next to icon */
+        int brightness = (int)gtk_range_get_value(GTK_RANGE(app_data.brightness_scale));
+        char label[16];
+        snprintf(label, sizeof(label), "%d%%", brightness);
+        app_indicator_set_label(app_data.indicator, label, "100%");
+    } else {
+        /* Clear label */
+        app_indicator_set_label(app_data.indicator, "", "");
+    }
+}
+
 static void update_indicator_menu(void)
 {
-    /* Update the auto brightness check menu item to match the main window checkbox */
+    gboolean show_brightness_in_tray = config_get_show_brightness_in_tray(app_data.config);
+    
+    /* Update menu items */
     GList *children = gtk_container_get_children(GTK_CONTAINER(app_data.indicator_menu));
     for (GList *iter = children; iter; iter = iter->next) {
         GtkWidget *child = GTK_WIDGET(iter->data);
+        
         if (GTK_IS_CHECK_MENU_ITEM(child)) {
             const char *label = gtk_menu_item_get_label(GTK_MENU_ITEM(child));
             if (label && strcmp(label, "Auto Brightness") == 0) {
                 gboolean main_active = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(app_data.auto_brightness_check));
                 gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(child), main_active);
-                break;
+            }
+        } else if (GTK_IS_MENU_ITEM(child)) {
+            const char *label = gtk_menu_item_get_label(GTK_MENU_ITEM(child));
+            if (label && strncmp(label, "Brightness", 10) == 0) {
+                /* Update brightness menu item label */
+                if (!show_brightness_in_tray && app_data.current_monitor) {
+                    int brightness = (int)gtk_range_get_value(GTK_RANGE(app_data.brightness_scale));
+                    char new_label[32];
+                    snprintf(new_label, sizeof(new_label), "Brightness: %d%%", brightness);
+                    gtk_menu_item_set_label(GTK_MENU_ITEM(child), new_label);
+                } else {
+                    gtk_menu_item_set_label(GTK_MENU_ITEM(child), "Brightness");
+                }
             }
         }
     }

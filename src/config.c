@@ -221,6 +221,42 @@ void config_set_start_minimized(AppConfig *config, gboolean minimized)
     config->modified = TRUE;
 }
 
+/* Get show brightness in tray setting */
+gboolean config_get_show_brightness_in_tray(AppConfig *config)
+{
+    if (!config) {
+        return FALSE;
+    }
+    
+    GError *error = NULL;
+    gboolean value = g_key_file_get_boolean(config->keyfile,
+                                           CONFIG_GROUP_GENERAL,
+                                           "show_brightness_in_tray",
+                                           &error);
+    
+    if (error) {
+        g_error_free(error);
+        return FALSE;  /* Default to not showing brightness in tray */
+    }
+    
+    return value;
+}
+
+/* Set show brightness in tray setting */
+void config_set_show_brightness_in_tray(AppConfig *config, gboolean show)
+{
+    if (!config) {
+        return;
+    }
+    
+    g_key_file_set_boolean(config->keyfile,
+                          CONFIG_GROUP_GENERAL,
+                          "show_brightness_in_tray",
+                          show);
+    
+    config->modified = TRUE;
+}
+
 /* Get per-monitor auto brightness setting */
 gboolean config_get_monitor_auto_brightness(AppConfig *config, const char *device_path)
 {
