@@ -1,0 +1,12 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=DDC Automatic Brightness (GTK)
+Comment=Control monitor brightness with automatic scheduling (C/GTK version)
+Exec=/usr/local/bin/ddc-automatic-brightness-gtk
+Icon=/usr/local/share/pixmaps/ddc-automatic-brightness-icon.png
+Terminal=false
+Categories=Utility;Settings;
+Keywords=brightness;monitor;display;ddccontrol;
+StartupNotify=true
+StartupWMClass=ddc-automatic-brightness-gtk
