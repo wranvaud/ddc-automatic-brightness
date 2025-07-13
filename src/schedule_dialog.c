@@ -48,7 +48,7 @@ void show_schedule_dialog(GtkWidget *parent, BrightnessScheduler *scheduler, App
                                               GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT,
                                               (const gchar*)NULL);
     
-    gtk_window_set_default_size(GTK_WINDOW(data->dialog), 500, 400);
+    gtk_window_set_default_size(GTK_WINDOW(data->dialog), 600, 600);
     
     /* Get dialog content area */
     GtkWidget *content_area = gtk_dialog_get_content_area(GTK_DIALOG(data->dialog));
@@ -105,6 +105,10 @@ void show_schedule_dialog(GtkWidget *parent, BrightnessScheduler *scheduler, App
                                   GTK_POLICY_AUTOMATIC,
                                   GTK_POLICY_AUTOMATIC);
     gtk_scrolled_window_set_shadow_type(GTK_SCROLLED_WINDOW(scrolled), GTK_SHADOW_IN);
+    
+    /* Set minimum size to show at least 10 schedule entries (about 300px) */
+    gtk_widget_set_size_request(scrolled, -1, 300);
+    
     gtk_container_add(GTK_CONTAINER(scrolled), data->schedule_list);
     gtk_container_add(GTK_CONTAINER(list_frame), scrolled);
     
