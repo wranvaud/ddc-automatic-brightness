@@ -111,7 +111,8 @@ void show_schedule_dialog(GtkWidget *parent, BrightnessScheduler *scheduler, App
                                   GTK_POLICY_AUTOMATIC);
     gtk_scrolled_window_set_shadow_type(GTK_SCROLLED_WINDOW(scrolled), GTK_SHADOW_IN);
     
-    /* Let the schedule list expand to fill available space */
+    /* Set minimum height to show about 8-10 schedule entries in 400x400 dialog */
+    gtk_widget_set_size_request(scrolled, -1, 200);
     
     gtk_container_add(GTK_CONTAINER(scrolled), data->schedule_list);
     gtk_container_add(GTK_CONTAINER(list_frame), scrolled);
