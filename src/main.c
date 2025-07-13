@@ -578,14 +578,47 @@ static void setup_tray_indicator(void)
                                           "brightness-control", 
                                           APP_INDICATOR_CATEGORY_APPLICATION_STATUS);
     
-    /* Set icon - try to use icon file, fallback to theme icon */
-    char *icon_path = g_build_filename(g_get_current_dir(), "ddc-automatic-brightness-icon.png", NULL);
-    if (g_file_test(icon_path, G_FILE_TEST_EXISTS)) {
-        app_indicator_set_icon_full(app_data.indicator, icon_path, "DDC Brightness");
-    } else {
-        app_indicator_set_icon(app_data.indicator, "brightness-control");
+    /* Set icon - try multiple locations and sizes */
+    char *base_paths[] = {
+        "/usr/local/share/pixmaps/ddc-automatic-brightness-icon",
+        g_build_filename(g_get_home_dir(), ".local/share/pixmaps/ddc-automatic-brightness-icon", NULL),
+        g_build_filename(g_get_current_dir(), "ddc-automatic-brightness-icon", NULL),
+        g_build_filename(g_get_current_dir(), "..", "ddc-automatic-brightness-icon", NULL),
+        NULL
+    };
+    
+    /* Try different icon sizes for better tray compatibility */
+    const char *sizes[] = {"", "-24", "-22", "-32", "-16", NULL};
+    
+    gboolean icon_set = FALSE;
+    for (int i = 0; base_paths[i] != NULL && !icon_set; i++) {
+        for (int j = 0; sizes[j] != NULL && !icon_set; j++) {
+            char *full_path = g_strdup_printf("%s%s.png", base_paths[i], sizes[j]);
+            if (g_file_test(full_path, G_FILE_TEST_EXISTS)) {
+                g_message("Using icon from: %s", full_path);
+                app_indicator_set_icon_full(app_data.indicator, full_path, "DDC Brightness");
+                icon_set = TRUE;
+            }
+            g_free(full_path);
+        }
     }
-    g_free(icon_path);
+    
+    if (!icon_set) {
+        g_message("Icon file not found, using theme icon");
+        /* Fallback to theme icons */
+        if (gtk_icon_theme_has_icon(gtk_icon_theme_get_default(), "display-brightness-symbolic")) {
+            app_indicator_set_icon(app_data.indicator, "display-brightness-symbolic");
+        } else if (gtk_icon_theme_has_icon(gtk_icon_theme_get_default(), "brightness-control")) {
+            app_indicator_set_icon(app_data.indicator, "brightness-control");
+        } else {
+            app_indicator_set_icon(app_data.indicator, "display");
+        }
+    }
+    
+    /* Free dynamically allocated paths */
+    for (int i = 1; base_paths[i] != NULL && i <= 3; i++) {
+        g_free(base_paths[i]);
+    }
     
     /* Set status */
     app_indicator_set_status(app_data.indicator, APP_INDICATOR_STATUS_ACTIVE);
