@@ -75,10 +75,11 @@ static gboolean on_window_delete_event(GtkWidget *widget, GdkEvent *event, gpoin
 
 #if HAVE_APPINDICATOR
 static void setup_tray_indicator(void);
-static void on_indicator_brightness_10(GtkMenuItem *item, gpointer data);
+static void on_indicator_brightness_20(GtkMenuItem *item, gpointer data);
 static void on_indicator_brightness_25(GtkMenuItem *item, gpointer data);
+static void on_indicator_brightness_35(GtkMenuItem *item, gpointer data);
 static void on_indicator_brightness_50(GtkMenuItem *item, gpointer data);
-static void on_indicator_brightness_75(GtkMenuItem *item, gpointer data);
+static void on_indicator_brightness_70(GtkMenuItem *item, gpointer data);
 static void on_indicator_brightness_100(GtkMenuItem *item, gpointer data);
 static void on_indicator_auto_brightness_toggle(GtkMenuItem *item, gpointer data);
 static void on_indicator_show_window(GtkMenuItem *item, gpointer data);
@@ -631,22 +632,25 @@ static void setup_tray_indicator(void)
     GtkWidget *brightness_submenu = gtk_menu_new();
     gtk_menu_item_set_submenu(GTK_MENU_ITEM(brightness_item), brightness_submenu);
     
-    GtkWidget *brightness_10 = gtk_menu_item_new_with_label("10%");
+    GtkWidget *brightness_20 = gtk_menu_item_new_with_label("20%");
     GtkWidget *brightness_25 = gtk_menu_item_new_with_label("25%");
+    GtkWidget *brightness_35 = gtk_menu_item_new_with_label("35%");
     GtkWidget *brightness_50 = gtk_menu_item_new_with_label("50%");
-    GtkWidget *brightness_75 = gtk_menu_item_new_with_label("75%");
+    GtkWidget *brightness_70 = gtk_menu_item_new_with_label("70%");
     GtkWidget *brightness_100 = gtk_menu_item_new_with_label("100%");
     
-    gtk_menu_shell_append(GTK_MENU_SHELL(brightness_submenu), brightness_10);
+    gtk_menu_shell_append(GTK_MENU_SHELL(brightness_submenu), brightness_20);
     gtk_menu_shell_append(GTK_MENU_SHELL(brightness_submenu), brightness_25);
+    gtk_menu_shell_append(GTK_MENU_SHELL(brightness_submenu), brightness_35);
     gtk_menu_shell_append(GTK_MENU_SHELL(brightness_submenu), brightness_50);
-    gtk_menu_shell_append(GTK_MENU_SHELL(brightness_submenu), brightness_75);
+    gtk_menu_shell_append(GTK_MENU_SHELL(brightness_submenu), brightness_70);
     gtk_menu_shell_append(GTK_MENU_SHELL(brightness_submenu), brightness_100);
     
-    g_signal_connect(brightness_10, "activate", G_CALLBACK(on_indicator_brightness_10), NULL);
+    g_signal_connect(brightness_20, "activate", G_CALLBACK(on_indicator_brightness_20), NULL);
     g_signal_connect(brightness_25, "activate", G_CALLBACK(on_indicator_brightness_25), NULL);
+    g_signal_connect(brightness_35, "activate", G_CALLBACK(on_indicator_brightness_35), NULL);
     g_signal_connect(brightness_50, "activate", G_CALLBACK(on_indicator_brightness_50), NULL);
-    g_signal_connect(brightness_75, "activate", G_CALLBACK(on_indicator_brightness_75), NULL);
+    g_signal_connect(brightness_70, "activate", G_CALLBACK(on_indicator_brightness_70), NULL);
     g_signal_connect(brightness_100, "activate", G_CALLBACK(on_indicator_brightness_100), NULL);
     
     /* Auto brightness toggle */
@@ -685,13 +689,13 @@ static void setup_tray_indicator(void)
 }
 
 /* Indicator brightness callbacks */
-static void on_indicator_brightness_10(GtkMenuItem *item, gpointer data)
+static void on_indicator_brightness_20(GtkMenuItem *item, gpointer data)
 {
     (void)item; (void)data;
     if (app_data.current_monitor) {
-        monitor_set_brightness(app_data.current_monitor, 10);
+        monitor_set_brightness(app_data.current_monitor, 20);
         app_data.updating_from_auto = TRUE;
-        gtk_range_set_value(GTK_RANGE(app_data.brightness_scale), 10);
+        gtk_range_set_value(GTK_RANGE(app_data.brightness_scale), 20);
         app_data.updating_from_auto = FALSE;
         update_brightness_display();
         
@@ -736,13 +740,30 @@ static void on_indicator_brightness_50(GtkMenuItem *item, gpointer data)
     }
 }
 
-static void on_indicator_brightness_75(GtkMenuItem *item, gpointer data)
+static void on_indicator_brightness_35(GtkMenuItem *item, gpointer data)
 {
     (void)item; (void)data;
     if (app_data.current_monitor) {
-        monitor_set_brightness(app_data.current_monitor, 75);
+        monitor_set_brightness(app_data.current_monitor, 35);
         app_data.updating_from_auto = TRUE;
-        gtk_range_set_value(GTK_RANGE(app_data.brightness_scale), 75);
+        gtk_range_set_value(GTK_RANGE(app_data.brightness_scale), 35);
+        app_data.updating_from_auto = FALSE;
+        update_brightness_display();
+        
+        /* Disable auto brightness */
+        if (gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(app_data.auto_brightness_check))) {
+            gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app_data.auto_brightness_check), FALSE);
+        }
+    }
+}
+
+static void on_indicator_brightness_70(GtkMenuItem *item, gpointer data)
+{
+    (void)item; (void)data;
+    if (app_data.current_monitor) {
+        monitor_set_brightness(app_data.current_monitor, 70);
+        app_data.updating_from_auto = TRUE;
+        gtk_range_set_value(GTK_RANGE(app_data.brightness_scale), 70);
         app_data.updating_from_auto = FALSE;
         update_brightness_display();
         

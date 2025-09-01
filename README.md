@@ -1,22 +1,15 @@
-# DDC Automatic Brightness - GTK Version
+# DDC Automatic Brightness
 
 A native C/GTK application for controlling monitor brightness using ddccontrol with automatic scheduling and system tray support.
 
 ## Features
 
-✅ **Native Performance**: Compiled C application with minimal resource usage  
 ✅ **System Tray Support**: Full tray integration with brightness controls and auto-brightness toggle  
-✅ **Proper Package Management**: .deb packaging for clean install/uninstall  
 ✅ **Monitor Detection**: Automatic DDC/CI compatible monitor discovery  
 ✅ **Brightness Control**: Real-time brightness adjustment with slider  
 ✅ **Automatic Scheduling**: Progressive brightness adjustment throughout the day  
 ✅ **Flexible Schedule**: Add/remove custom time points and brightness levels  
-✅ **Desktop Integration**: Native .desktop file and system menu integration  
 ✅ **Startup Options**: Run minimized to tray, --help, --tray modes  
-
-## Screenshots
-
-*Screenshots will be added here*
 
 ## Installation
 
@@ -50,6 +43,9 @@ sudo dpkg -i ddc-automatic-brightness-gtk_1.0.0_amd64.deb
 
 ### Quick Test
 
+Go to the folder src/.
+After making changes run "make".
+
 ```bash
 # Test compilation
 ./ddc-automatic-brightness-gtk --help
@@ -70,14 +66,6 @@ Options:
   --no-gui             Run in background (tray only)
   --help, -h           Show help
 ```
-
-### System Tray Features
-
-**Right-click tray icon for menu:**
-- **Brightness submenu**: Quick 10%, 25%, 50%, 75%, 100% settings
-- **Auto Brightness**: Toggle automatic scheduling
-- **Show Window**: Open configuration GUI
-- **Quit**: Exit application
 
 ### GUI Controls
 
@@ -116,18 +104,6 @@ src/
 - **GLib 2.0**: Core utilities and configuration
 - **libayatana-appindicator3**: System tray support
 - **ddccontrol**: Monitor communication
-
-### Advantages Over Python Version
-
-| Feature | GTK (C) Version | Python Version |
-|---------|-----------------|----------------|
-| **Installation** | Package manager | Manual copying |
-| **Uninstallation** | Complete removal | Manual cleanup |
-| **Memory Usage** | ~5-10MB | ~20-30MB |
-| **Startup Time** | Instant | 1-2 seconds |
-| **Dependencies** | System libraries | Python + packages |
-| **Tray Integration** | Native AppIndicator | pystray library |
-| **Distribution** | .deb/.rpm packages | Scripts only |
 
 ## Development
 
@@ -183,8 +159,4 @@ sudo apt install build-essential libgtk-3-dev libglib2.0-dev
 
 ## License
 
-Following ddccontrol project licensing for potential upstream contribution.
-
----
-
-**This is the professional C/GTK implementation with full system integration, package management, and tray support.**
+The project is licensed under `GNU General Public License v2.0` license.
