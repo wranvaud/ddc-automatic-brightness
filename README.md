@@ -1,29 +1,39 @@
 # DDC Automatic Brightness
 
-A native C/GTK application for controlling monitor brightness using ddccontrol with automatic scheduling and system tray support.
+An application for controlling monitor brightness using ddccontrol with automatic scheduling and system tray support.
 
 ## Features
 
-✅ **System Tray Support**: Full tray integration with brightness controls and auto-brightness toggle  
-✅ **Monitor Detection**: Automatic DDC/CI compatible monitor discovery  
+✅ **Smart Monitor Detection**: Automatic DDC/CI monitor discovery  
+✅ **Hardware Auto-Detection**: Real-time detection of newly connected monitors via udev (when available)  
+✅ **Enhanced Tray Integration**: Full tray support with brightness controls and schedule preview  
+✅ **Schedule Transparency**: Tray menu shows current scheduled brightness even when auto-brightness is disabled  
 ✅ **Brightness Control**: Real-time brightness adjustment with slider  
 ✅ **Automatic Scheduling**: Progressive brightness adjustment throughout the day  
-✅ **Flexible Schedule**: Add/remove custom time points and brightness levels  
 ✅ **Startup Options**: Run minimized to tray, --help, --tray modes  
+
+## Recent Improvements
+
+🔌 **Hardware Auto-Detection**: Automatically detects newly connected monitors in real-time using udev events (when libudev-dev is installed). Just plug in your monitor and it appears instantly!
+
+👁️ **Schedule Transparency**: The tray menu now shows "Auto Brightness: 70%" displaying what brightness would be applied if auto-brightness were enabled, updating every minute throughout the day.
 
 ## Installation
 
 ### Prerequisites
 
 ```bash
-# Ubuntu/Debian
+# Ubuntu/Debian (Required)
 sudo apt install build-essential libgtk-3-dev libglib2.0-dev libayatana-appindicator3-dev ddccontrol
 
+# Ubuntu/Debian (Optional - for hardware auto-detection)
+sudo apt install libudev-dev
+
 # Fedora
-sudo dnf install gcc gtk3-devel glib2-devel libayatana-appindicator-gtk3-devel ddccontrol
+sudo dnf install gcc gtk3-devel glib2-devel libayatana-appindicator-gtk3-devel ddccontrol libudev-devel
 
 # Arch Linux
-sudo pacman -S base-devel gtk3 glib2 libayatana-appindicator ddccontrol
+sudo pacman -S base-devel gtk3 glib2 libayatana-appindicator ddccontrol systemd-libs
 ```
 
 ### Build and Install
@@ -69,11 +79,18 @@ Options:
 
 ### GUI Controls
 
-1. **Monitor Selection**: Choose your monitor from dropdown
+1. **Monitor Selection**: Choose your monitor from dropdown (auto-refreshes when new hardware detected)
 2. **Brightness Slider**: Real-time brightness control (click to jump to position)
 3. **Auto Brightness**: Enable/disable scheduled brightness changes
 4. **Configure Schedule**: Set custom time/brightness points
 5. **Startup Options**: "Start minimized to system tray" checkbox
+
+### System Tray Features
+
+- **Smart Status Indicator**: Shows "X" when no monitors found, brightness percentage when available
+- **Schedule Preview**: "Auto Brightness: 70%" shows current scheduled brightness (updates every minute)
+- **Hardware Detection**: Automatically detects newly connected monitors and retries detection
+- **Brightness Quick-Select**: 20%, 25%, 35%, 50%, 70%, 100% options
 
 ### Configuration
 
@@ -104,6 +121,7 @@ src/
 - **GLib 2.0**: Core utilities and configuration
 - **libayatana-appindicator3**: System tray support
 - **ddccontrol**: Monitor communication
+- **libudev** (optional): Hardware auto-detection for newly connected monitors
 
 ## Development
 
@@ -139,6 +157,9 @@ make check-deps
 ```
 
 ### No Monitors Detected
+
+The app now uses intelligent retry logic - it will automatically retry detection at 30s, 90s, and 180s after startup. You'll see an "X" in the tray icon when no monitors are found.
+
 ```bash
 # Test ddccontrol directly
 sudo ddccontrol -p
@@ -146,6 +167,20 @@ sudo ddccontrol -p
 # Check permissions
 sudo usermod -a -G i2c $USER
 # Log out and back in
+
+# For immediate detection, click "Refresh Monitors" in the GUI
+```
+
+### Hardware Auto-Detection Not Working
+```bash
+# Install udev development headers
+sudo apt install libudev-dev
+
+# Rebuild with hardware detection support
+make clean && make
+
+# Check if hardware detection is enabled
+make check-deps
 ```
 
 ### Compilation Errors

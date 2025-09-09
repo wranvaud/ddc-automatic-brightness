@@ -19,8 +19,18 @@ else
 	APPINDICATOR_LDFLAGS = 
 endif
 
-CFLAGS = -Wall -Wextra -O2 -std=c99 $(shell pkg-config --cflags gtk+-3.0 glib-2.0) $(APPINDICATOR_CFLAGS)
-LDFLAGS = $(shell pkg-config --libs gtk+-3.0 glib-2.0) $(APPINDICATOR_LDFLAGS)
+# Check for libudev header availability (more accurate than runtime library)
+LIBUDEV_HEADERS := $(shell echo '#include <libudev.h>' | gcc -E -x c - >/dev/null 2>&1 && echo "yes" || echo "no")
+ifeq ($(LIBUDEV_HEADERS),yes)
+	UDEV_CFLAGS = -DHAVE_LIBUDEV
+	UDEV_LDFLAGS = -ludev
+else
+	UDEV_CFLAGS = 
+	UDEV_LDFLAGS = 
+endif
+
+CFLAGS = -Wall -Wextra -O2 -std=c99 $(shell pkg-config --cflags gtk+-3.0 glib-2.0) $(APPINDICATOR_CFLAGS) $(UDEV_CFLAGS)
+LDFLAGS = $(shell pkg-config --libs gtk+-3.0 glib-2.0) $(APPINDICATOR_LDFLAGS) $(UDEV_LDFLAGS)
 
 # Target executable
 TARGET = ddc-automatic-brightness-gtk
@@ -57,6 +67,12 @@ check-deps:
 	else \
 		echo "⚠ AppIndicator libraries not found - tray functionality will be disabled"; \
 		echo "  For tray support, install: sudo apt install libayatana-appindicator3-dev"; \
+	fi
+	@if echo '#include <libudev.h>' | gcc -E -x c - >/dev/null 2>&1; then \
+		echo "✓ libudev support available (hardware auto-detection enabled)"; \
+	else \
+		echo "⚠ libudev headers not found - hardware auto-detection will be disabled"; \
+		echo "  For auto-detection support, install: sudo apt install libudev-dev"; \
 	fi
 
 # Install target
