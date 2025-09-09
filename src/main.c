@@ -15,6 +15,11 @@
 #include <sys/stat.h>
 #include <errno.h>
 
+/* Check if libudev is available - this will be defined by the Makefile */
+#ifdef HAVE_LIBUDEV
+    #include <libudev.h>
+#endif
+
 #ifdef HAVE_LIBAYATANA_APPINDICATOR
 #include <libayatana-appindicator/app-indicator.h>
 #define HAVE_APPINDICATOR 1
@@ -50,6 +55,19 @@ typedef struct {
     guint auto_brightness_timer;
     gboolean start_minimized;
     
+    /* Monitor detection retry state */
+    guint monitor_retry_timer;
+    int monitor_retry_attempt;
+    gboolean monitors_found;
+    
+    /* Udev monitoring for hardware changes */
+#if HAVE_LIBUDEV
+    struct udev *udev;
+    struct udev_monitor *udev_monitor;
+    GIOChannel *udev_io_channel;
+    guint udev_watch_id;
+#endif
+    
 #if HAVE_APPINDICATOR
     AppIndicator *indicator;
     GtkWidget *indicator_menu;
@@ -70,8 +88,15 @@ static void on_show_brightness_tray_toggled(GtkToggleButton *button, gpointer da
 static gboolean auto_brightness_timer_callback(gpointer data);
 static void setup_ui(void);
 static void load_monitors(void);
+static gboolean load_monitors_with_retry(gpointer data);
+static gboolean recheck_monitors_immediately(gpointer data);
 static void update_brightness_display(void);
 static gboolean on_window_delete_event(GtkWidget *widget, GdkEvent *event, gpointer data);
+#if HAVE_LIBUDEV
+static gboolean setup_udev_monitoring(void);
+static void cleanup_udev_monitoring(void);
+static gboolean on_udev_event(GIOChannel *channel, GIOCondition condition, gpointer data);
+#endif
 
 #if HAVE_APPINDICATOR
 static void setup_tray_indicator(void);
@@ -146,15 +171,23 @@ int main(int argc, char *argv[])
     setup_tray_indicator();
 #endif
     
+    /* Setup udev monitoring for hardware changes */
+#if HAVE_LIBUDEV
+    setup_udev_monitoring();
+#endif
+    
     /* Load monitors */
     load_monitors();
     
-    /* Start auto brightness timer if enabled */
-    if (config_get_auto_brightness_enabled(app_data.config)) {
-        app_data.auto_brightness_timer = g_timeout_add_seconds(60, 
-                                                              auto_brightness_timer_callback, 
-                                                              &app_data);
-    }
+    /* Update tray icon after initial monitor detection */
+#if HAVE_APPINDICATOR
+    update_tray_icon_label();
+#endif
+    
+    /* Start timer for menu updates and auto brightness (runs always) */
+    app_data.auto_brightness_timer = g_timeout_add_seconds(60, 
+                                                          auto_brightness_timer_callback, 
+                                                          &app_data);
     
     /* Show main window unless starting minimized */
     if (!start_minimized || !HAVE_APPINDICATOR) {
@@ -171,6 +204,15 @@ int main(int argc, char *argv[])
     if (app_data.auto_brightness_timer > 0) {
         g_source_remove(app_data.auto_brightness_timer);
     }
+    
+    if (app_data.monitor_retry_timer > 0) {
+        g_source_remove(app_data.monitor_retry_timer);
+    }
+    
+    /* Cleanup udev monitoring */
+#if HAVE_LIBUDEV
+    cleanup_udev_monitoring();
+#endif
     
     if (app_data.monitors) {
         monitor_list_free(app_data.monitors);
@@ -254,8 +296,9 @@ static void on_auto_brightness_toggled(GtkToggleButton *button, gpointer data)
                                           monitor_get_device_path(app_data.current_monitor),
                                           enabled);
         
-        /* Start/stop timer */
+        /* Apply brightness immediately if auto brightness is being enabled */
         if (enabled) {
+            /* Start timer if not already running (should already be running now) */
             if (app_data.auto_brightness_timer == 0) {
                 app_data.auto_brightness_timer = g_timeout_add_seconds(60, 
                                                                       auto_brightness_timer_callback, 
@@ -271,12 +314,8 @@ static void on_auto_brightness_toggled(GtkToggleButton *button, gpointer data)
                 app_data.updating_from_auto = FALSE;
                 update_brightness_display();
             }
-        } else {
-            if (app_data.auto_brightness_timer > 0) {
-                g_source_remove(app_data.auto_brightness_timer);
-                app_data.auto_brightness_timer = 0;
-            }
         }
+        /* Note: Timer now continues running to update menu even when auto brightness is disabled */
     }
     
     /* Update tray indicator menu */
@@ -296,7 +335,16 @@ static void on_schedule_clicked(GtkButton *button, gpointer data)
 /* Refresh monitors button clicked */
 static void on_refresh_monitors_clicked(GtkButton *button, gpointer data)
 {
+    /* Cancel any pending retry timer */
+    if (app_data.monitor_retry_timer > 0) {
+        g_source_remove(app_data.monitor_retry_timer);
+        app_data.monitor_retry_timer = 0;
+    }
+    
+    /* Set retry attempt to a manual value to show error dialog if no monitors found */
+    app_data.monitor_retry_attempt = -2;  /* Special value for manual refresh */
     load_monitors();
+    app_data.monitor_retry_attempt = 0;   /* Reset after manual refresh */
 }
 
 /* Auto brightness timer callback */
@@ -332,12 +380,12 @@ static gboolean auto_brightness_timer_callback(gpointer data)
         }
     }
     
-    /* Stop timer if no monitors have auto brightness enabled */
-    if (!any_auto_enabled) {
-        app_data.auto_brightness_timer = 0;
-        return FALSE; /* Stop timer */
-    }
+    /* Update tray menu to show current scheduled brightness (always) */
+#if HAVE_APPINDICATOR
+    update_indicator_menu();
+#endif
     
+    /* Timer continues running regardless of auto brightness status to update menu */
     return TRUE; /* Continue timer */
 }
 
@@ -479,14 +527,31 @@ static void load_monitors(void)
     app_data.monitors = monitor_detect_all();
     
     if (!app_data.monitors || monitor_list_get_count(app_data.monitors) == 0) {
-        GtkWidget *dialog = gtk_message_dialog_new(GTK_WINDOW(app_data.main_window),
-                                                  GTK_DIALOG_MODAL,
-                                                  GTK_MESSAGE_WARNING,
-                                                  GTK_BUTTONS_OK,
-                                                  "No DDC/CI compatible monitors found.");
-        gtk_dialog_run(GTK_DIALOG(dialog));
-        gtk_widget_destroy(dialog);
+        app_data.monitors_found = FALSE;
+        
+        /* Start retry timer if this is the initial load (retry_attempt == 0) */
+        if (app_data.monitor_retry_attempt == 0) {
+            app_data.monitor_retry_attempt = 1;
+            app_data.monitor_retry_timer = g_timeout_add_seconds(30, load_monitors_with_retry, NULL);
+            g_message("No monitors found on startup, will retry in 30 seconds...");
+        }
+        
+#if HAVE_APPINDICATOR
+        /* Update tray icon to reflect no monitors state */
+        update_tray_icon_label();
+#endif
         return;
+    }
+    
+    /* Monitors found! */
+    app_data.monitors_found = TRUE;
+    
+    /* Cancel any pending retry timer */
+    if (app_data.monitor_retry_timer > 0) {
+        g_source_remove(app_data.monitor_retry_timer);
+        app_data.monitor_retry_timer = 0;
+        app_data.monitor_retry_attempt = 0;
+        g_message("Monitors detected successfully!");
     }
     
     /* Populate combo box */
@@ -511,6 +576,147 @@ static void load_monitors(void)
     } else {
         gtk_combo_box_set_active(GTK_COMBO_BOX(app_data.monitor_combo), 0);
     }
+    
+#if HAVE_APPINDICATOR
+    /* Update tray icon to reflect monitors found */
+    update_tray_icon_label();
+#endif
+}
+
+/* Retry monitor detection with delayed intervals */
+static gboolean load_monitors_with_retry(gpointer data)
+{
+    (void)data;
+    
+    /* Clear the timer ID since it's about to complete */
+    app_data.monitor_retry_timer = 0;
+    
+    /* Try to detect monitors again */
+    g_message("Retrying monitor detection (attempt %d)...", app_data.monitor_retry_attempt);
+    
+    /* Temporarily increase retry attempt to avoid triggering another retry from load_monitors */
+    int saved_attempt = app_data.monitor_retry_attempt;
+    app_data.monitor_retry_attempt = -1;  /* Special value to indicate retry in progress */
+    
+    /* Clear existing monitors */
+    if (app_data.monitors) {
+        monitor_list_free(app_data.monitors);
+        app_data.monitors = NULL;
+        app_data.current_monitor = NULL;
+    }
+    
+    /* Clear combo box */
+    GtkTreeModel *model = gtk_combo_box_get_model(GTK_COMBO_BOX(app_data.monitor_combo));
+    if (model) {
+        gtk_list_store_clear(GTK_LIST_STORE(model));
+    }
+    
+    /* Detect monitors */
+    app_data.monitors = monitor_detect_all();
+    
+    if (!app_data.monitors || monitor_list_get_count(app_data.monitors) == 0) {
+        /* Restore attempt counter */
+        app_data.monitor_retry_attempt = saved_attempt;
+        
+        /* Schedule next retry based on attempt number */
+        if (app_data.monitor_retry_attempt == 1) {
+            /* Second attempt: retry after 90 seconds from startup (60 more seconds) */
+            app_data.monitor_retry_attempt = 2;
+            app_data.monitor_retry_timer = g_timeout_add_seconds(60, load_monitors_with_retry, NULL);
+            g_message("No monitors found on retry 1, will retry in 60 seconds...");
+        } else if (app_data.monitor_retry_attempt == 2) {
+            /* Third attempt: retry after 180 seconds from startup (90 more seconds) */
+            app_data.monitor_retry_attempt = 3;
+            app_data.monitor_retry_timer = g_timeout_add_seconds(90, load_monitors_with_retry, NULL);
+            g_message("No monitors found on retry 2, will retry in 90 seconds...");
+        } else {
+            /* Final attempt failed, stop retrying */
+            app_data.monitor_retry_attempt = 0;
+            app_data.monitors_found = FALSE;
+            g_message("All monitor detection attempts failed");
+            
+#if HAVE_APPINDICATOR
+            /* Update tray icon to reflect no monitors state */
+            update_tray_icon_label();
+#endif
+        }
+        
+        return FALSE; /* Stop the current timer */
+    }
+    
+    /* Monitors found! */
+    app_data.monitors_found = TRUE;
+    app_data.monitor_retry_attempt = 0;
+    g_message("Monitors detected successfully on retry!");
+    
+    /* Populate combo box */
+    const char *default_monitor = config_get_default_monitor(app_data.config);
+    int default_index = -1;
+    
+    for (int i = 0; i < monitor_list_get_count(app_data.monitors); i++) {
+        Monitor *monitor = monitor_list_get_monitor(app_data.monitors, i);
+        const char *display_name = monitor_get_display_name(monitor);
+        const char *device_path = monitor_get_device_path(monitor);
+        
+        gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(app_data.monitor_combo), display_name);
+        
+        if (default_monitor && strcmp(device_path, default_monitor) == 0) {
+            default_index = i;
+        }
+    }
+    
+    /* Select default monitor */
+    if (default_index >= 0) {
+        gtk_combo_box_set_active(GTK_COMBO_BOX(app_data.monitor_combo), default_index);
+    } else {
+        gtk_combo_box_set_active(GTK_COMBO_BOX(app_data.monitor_combo), 0);
+    }
+    
+#if HAVE_APPINDICATOR
+    /* Update tray icon to reflect monitors found */
+    update_tray_icon_label();
+#endif
+    
+    return FALSE; /* Stop the timer */
+}
+
+/* Immediately re-check monitor availability (for hardware disconnect events) */
+static gboolean recheck_monitors_immediately(gpointer data)
+{
+    (void)data;
+    
+    g_message("Re-checking monitor availability immediately");
+    
+    /* Save current state to compare after re-detection */
+    gboolean had_monitors = app_data.monitors_found;
+    
+    /* Re-run monitor detection */
+    load_monitors();
+    
+    /* If we had monitors before but don't now, update the UI appropriately */
+    if (had_monitors && !app_data.monitors_found) {
+        g_message("Monitor disconnection detected - updating UI");
+        
+        /* Clear current monitor selection */
+        app_data.current_monitor = NULL;
+        
+        /* Clear combo box */
+        GtkTreeModel *model = gtk_combo_box_get_model(GTK_COMBO_BOX(app_data.monitor_combo));
+        if (model) {
+            gtk_list_store_clear(GTK_LIST_STORE(model));
+        }
+        
+        /* Reset brightness display */
+        gtk_range_set_value(GTK_RANGE(app_data.brightness_scale), 50);
+        update_brightness_display();
+        
+#if HAVE_APPINDICATOR
+        /* Update tray icon to show "X" */
+        update_tray_icon_label();
+#endif
+    }
+    
+    return FALSE; /* Single execution */
 }
 
 /* Update brightness percentage display */
@@ -817,6 +1023,13 @@ static void update_tray_icon_label(void)
         return;
     }
     
+    /* Check if monitors are available */
+    if (!app_data.monitors_found || !app_data.current_monitor) {
+        /* Show "X" to indicate no monitors found */
+        app_indicator_set_label(app_data.indicator, "X", "X");
+        return;
+    }
+    
     gboolean show_brightness = config_get_show_brightness_in_tray(app_data.config);
     
     if (show_brightness && app_data.current_monitor) {
@@ -842,9 +1055,19 @@ static void update_indicator_menu(void)
         
         if (GTK_IS_CHECK_MENU_ITEM(child)) {
             const char *label = gtk_menu_item_get_label(GTK_MENU_ITEM(child));
-            if (label && strcmp(label, "Auto Brightness") == 0) {
+            if (label && (strcmp(label, "Auto Brightness") == 0 || strncmp(label, "Auto Brightness:", 16) == 0)) {
                 gboolean main_active = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(app_data.auto_brightness_check));
                 gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(child), main_active);
+                
+                /* Update label to show scheduled brightness value */
+                int scheduled_brightness = scheduler_get_current_brightness(app_data.scheduler);
+                if (scheduled_brightness >= 0) {
+                    char new_label[32];
+                    snprintf(new_label, sizeof(new_label), "Auto Brightness: %d%%", scheduled_brightness);
+                    gtk_menu_item_set_label(GTK_MENU_ITEM(child), new_label);
+                } else {
+                    gtk_menu_item_set_label(GTK_MENU_ITEM(child), "Auto Brightness");
+                }
             }
         } else if (GTK_IS_MENU_ITEM(child)) {
             const char *label = gtk_menu_item_get_label(GTK_MENU_ITEM(child));
@@ -865,3 +1088,133 @@ static void update_indicator_menu(void)
 }
 
 #endif
+
+#if HAVE_LIBUDEV
+/* Setup udev monitoring for hardware changes */
+static gboolean setup_udev_monitoring(void)
+{
+    app_data.udev = udev_new();
+    if (!app_data.udev) {
+        g_warning("Cannot create udev context");
+        return FALSE;
+    }
+    
+    app_data.udev_monitor = udev_monitor_new_from_netlink(app_data.udev, "udev");
+    if (!app_data.udev_monitor) {
+        g_warning("Cannot create udev monitor");
+        udev_unref(app_data.udev);
+        app_data.udev = NULL;
+        return FALSE;
+    }
+    
+    /* Monitor USB and DRM (display) subsystems for relevant hardware changes */
+    udev_monitor_filter_add_match_subsystem_devtype(app_data.udev_monitor, "usb", NULL);
+    udev_monitor_filter_add_match_subsystem_devtype(app_data.udev_monitor, "drm", NULL);
+    udev_monitor_filter_add_match_subsystem_devtype(app_data.udev_monitor, "i2c", NULL);
+    
+    if (udev_monitor_enable_receiving(app_data.udev_monitor) < 0) {
+        g_warning("Cannot enable udev monitor");
+        udev_monitor_unref(app_data.udev_monitor);
+        udev_unref(app_data.udev);
+        app_data.udev_monitor = NULL;
+        app_data.udev = NULL;
+        return FALSE;
+    }
+    
+    /* Create GIO channel to monitor udev events */
+    int fd = udev_monitor_get_fd(app_data.udev_monitor);
+    app_data.udev_io_channel = g_io_channel_unix_new(fd);
+    
+    /* Set up the watch */
+    app_data.udev_watch_id = g_io_add_watch(app_data.udev_io_channel, 
+                                           G_IO_IN, 
+                                           on_udev_event, 
+                                           NULL);
+    
+    g_message("Udev monitoring setup successfully");
+    return TRUE;
+}
+
+/* Cleanup udev monitoring */
+static void cleanup_udev_monitoring(void)
+{
+    if (app_data.udev_watch_id > 0) {
+        g_source_remove(app_data.udev_watch_id);
+        app_data.udev_watch_id = 0;
+    }
+    
+    if (app_data.udev_io_channel) {
+        g_io_channel_unref(app_data.udev_io_channel);
+        app_data.udev_io_channel = NULL;
+    }
+    
+    if (app_data.udev_monitor) {
+        udev_monitor_unref(app_data.udev_monitor);
+        app_data.udev_monitor = NULL;
+    }
+    
+    if (app_data.udev) {
+        udev_unref(app_data.udev);
+        app_data.udev = NULL;
+    }
+}
+
+/* Handle udev events */
+static gboolean on_udev_event(GIOChannel *channel, GIOCondition condition, gpointer data)
+{
+    (void)channel; (void)data;
+    
+    if (condition & G_IO_IN) {
+        struct udev_device *device = udev_monitor_receive_device(app_data.udev_monitor);
+        if (device) {
+            const char *action = udev_device_get_action(device);
+            const char *subsystem = udev_device_get_subsystem(device);
+            /* const char *devtype = udev_device_get_devtype(device); */ /* Not currently used */
+            
+            /* Check for device addition/removal events that might affect display hardware */
+            if (action && (strcmp(action, "add") == 0 || strcmp(action, "remove") == 0)) {
+                gboolean should_check_monitors = FALSE;
+                
+                if (subsystem && strcmp(subsystem, "drm") == 0) {
+                    /* DRM device added/removed - could be display hardware */
+                    should_check_monitors = TRUE;
+                    g_message("DRM device %s, checking monitor status", action);
+                } else if (subsystem && strcmp(subsystem, "usb") == 0) {
+                    /* USB device added/removed - could be USB-C/Thunderbolt display */
+                    should_check_monitors = TRUE;
+                    g_message("USB device %s, checking monitor status", action);
+                } else if (subsystem && strcmp(subsystem, "i2c") == 0) {
+                    /* I2C device added/removed - DDC/CI uses I2C */
+                    should_check_monitors = TRUE;
+                    g_message("I2C device %s, checking monitor status", action);
+                }
+                
+                if (should_check_monitors) {
+                    /* Cancel any existing retry timer */
+                    if (app_data.monitor_retry_timer > 0) {
+                        g_source_remove(app_data.monitor_retry_timer);
+                        app_data.monitor_retry_timer = 0;
+                    }
+                    
+                    if (strcmp(action, "add") == 0) {
+                        /* Device added - retry detection if we don't have monitors */
+                        if (!app_data.monitors_found) {
+                            app_data.monitor_retry_attempt = 1;
+                            app_data.monitor_retry_timer = g_timeout_add_seconds(2, load_monitors_with_retry, NULL);
+                            g_message("Hardware added, will retry monitor detection in 2 seconds");
+                        }
+                    } else if (strcmp(action, "remove") == 0) {
+                        /* Device removed - immediately re-check to see if our monitor was disconnected */
+                        g_timeout_add_seconds(1, recheck_monitors_immediately, NULL);
+                        g_message("Hardware removed, will re-check monitor status in 1 second");
+                    }
+                }
+            }
+            
+            udev_device_unref(device);
+        }
+    }
+    
+    return TRUE; /* Keep the watch active */
+}
+#endif /* HAVE_LIBUDEV */
