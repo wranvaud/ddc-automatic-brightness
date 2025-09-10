@@ -1,0 +1,23 @@
+name: ddc-automatic-brightness
+version: '1.0.0'
+summary: GUI application for automatic monitor brightness control with smart hardware detection
+description: |
+  A modern GTK+ application that provides automatic brightness scheduling for DDC/CI compatible monitors. Features include real-time hardware detection via udev, intelligent startup retry logic, schedule transparency in system tray, and plug-and-play monitor support.
+
+grade: stable
+confinement: classic
+base: core20
+
+parts:
+  ddc-brightness:
+    plugin: dump
+    source: .
+    organize:
+      ddc-automatic-brightness-gtk: bin/ddc-automatic-brightness-gtk
+      ../ddc-automatic-brightness-gtk.desktop: share/applications/ddc-automatic-brightness-gtk.desktop
+      ../ddc-automatic-brightness-icon.png: share/pixmaps/ddc-automatic-brightness-icon.png
+
+apps:
+  ddc-automatic-brightness:
+    command: bin/ddc-automatic-brightness-gtk
+    desktop: share/applications/ddc-automatic-brightness-gtk.desktop

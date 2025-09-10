@@ -1,0 +1,40 @@
+{
+    "app-id": "com.github.ddcbrightness.DDCAutomaticBrightness",
+    "runtime": "org.gnome.Platform",
+    "runtime-version": "44",
+    "sdk": "org.gnome.Sdk",
+    "command": "ddc-automatic-brightness-gtk",
+    "finish-args": [
+        "--share=ipc",
+        "--socket=x11",
+        "--socket=wayland",
+        "--device=all",
+        "--filesystem=home",
+        "--talk-name=org.freedesktop.Notifications"
+    ],
+    "modules": [
+        {
+            "name": "ddc-automatic-brightness",
+            "buildsystem": "simple",
+            "build-commands": [
+                "install -Dm755 ddc-automatic-brightness-gtk /app/bin/ddc-automatic-brightness-gtk",
+                "install -Dm644 ddc-automatic-brightness-gtk.desktop /app/share/applications/com.github.ddcbrightness.DDCAutomaticBrightness.desktop",
+                "install -Dm644 ddc-automatic-brightness-icon.png /app/share/pixmaps/ddc-automatic-brightness-icon.png"
+            ],
+            "sources": [
+                {
+                    "type": "file",
+                    "path": "ddc-automatic-brightness-gtk"
+                },
+                {
+                    "type": "file",
+                    "path": "../ddc-automatic-brightness-gtk.desktop"
+                },
+                {
+                    "type": "file",
+                    "path": "../ddc-automatic-brightness-icon.png"
+                }
+            ]
+        }
+    ]
+}

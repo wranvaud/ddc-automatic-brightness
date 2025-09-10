@@ -1,0 +1,21 @@
+# Maintainer: "DDC Automatic Brightness Team <noreply@example.com>"
+pkgname=ddc-automatic-brightness-gtk
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="GUI application for automatic monitor brightness control with smart hardware detection"
+arch=('x86_64' 'aarch64')
+url="https://github.com/user/ddc-automatic-brightness"
+license=('GPL2')
+depends=('gtk3' 'glib2' 'libayatana-appindicator' 'ddccontrol')
+optdepends=('systemd: hardware auto-detection support')
+source=()
+md5sums=()
+
+package() {
+    # This PKGBUILD is for reference - actual implementation would build from source
+    install -Dm755 "$srcdir/ddc-automatic-brightness-gtk" "$pkgdir/usr/local/bin/ddc-automatic-brightness-gtk"
+    install -Dm644 "$srcdir/ddc-automatic-brightness-gtk.desktop" "$pkgdir/usr/local/share/applications/ddc-automatic-brightness-gtk.desktop"
+    install -Dm644 "$srcdir/ddc-automatic-brightness-icon.png" "$pkgdir/usr/local/share/pixmaps/ddc-automatic-brightness-icon.png"
+    install -Dm644 "$srcdir/README.md" "$pkgdir/usr/local/share/doc/$pkgname/README.md"
+    install -Dm644 "$srcdir/LICENSE" "$pkgdir/usr/local/share/doc/$pkgname/LICENSE"
+}
