@@ -94,32 +94,279 @@ uninstall:
 clean:
 	rm -f $(OBJECTS) $(TARGET)
 
-# Package creation
-package: $(TARGET)
-	@echo "Creating package structure..."
-	mkdir -p package/usr/local/bin
-	mkdir -p package/usr/local/share/applications
-	mkdir -p package/usr/local/share/pixmaps
-	mkdir -p package/DEBIAN
+# Package version and info
+PKG_VERSION = 1.0.0
+PKG_NAME = ddc-automatic-brightness-gtk
+PKG_DESC = "GUI application for automatic monitor brightness control with smart hardware detection"
+PKG_LONG_DESC = "A modern GTK+ application that provides automatic brightness scheduling for DDC/CI compatible monitors. Features include real-time hardware detection via udev, intelligent startup retry logic, schedule transparency in system tray, and plug-and-play monitor support."
+PKG_MAINTAINER = "DDC Automatic Brightness Team <noreply@example.com>"
+PKG_HOMEPAGE = "https://github.com/user/ddc-automatic-brightness"
+
+# Detect architecture
+ARCH := $(shell uname -m)
+ifeq ($(ARCH),x86_64)
+	DEB_ARCH = amd64
+	RPM_ARCH = x86_64
+else ifeq ($(ARCH),aarch64)
+	DEB_ARCH = arm64
+	RPM_ARCH = aarch64
+else
+	DEB_ARCH = $(ARCH)
+	RPM_ARCH = $(ARCH)
+endif
+
+# Package creation - .deb format (Debian/Ubuntu)
+package-deb: $(TARGET)
+	@echo "Creating .deb package structure..."
+	rm -rf package-deb
+	mkdir -p package-deb/usr/local/bin
+	mkdir -p package-deb/usr/local/share/applications
+	mkdir -p package-deb/usr/local/share/pixmaps
+	mkdir -p package-deb/usr/local/share/doc/$(PKG_NAME)
+	mkdir -m 755 package-deb/DEBIAN
 	
-	cp $(TARGET) package/usr/local/bin/
-	cp ../ddc-automatic-brightness-gtk.desktop package/usr/local/share/applications/
-	cp ../ddc-automatic-brightness-icon.png package/usr/local/share/pixmaps/
+	# Copy files
+	cp $(TARGET) package-deb/usr/local/bin/
+	cp ../ddc-automatic-brightness-gtk.desktop package-deb/usr/local/share/applications/
+	cp ../ddc-automatic-brightness-icon*.png package-deb/usr/local/share/pixmaps/
+	cp ../README.md package-deb/usr/local/share/doc/$(PKG_NAME)/
+	cp ../LICENSE package-deb/usr/local/share/doc/$(PKG_NAME)/
 	
-	echo "Package: ddc-automatic-brightness-gtk" > package/DEBIAN/control
-	echo "Version: 1.0.0" >> package/DEBIAN/control
-	echo "Section: utils" >> package/DEBIAN/control
-	echo "Priority: optional" >> package/DEBIAN/control
-	echo "Architecture: amd64" >> package/DEBIAN/control
-	echo "Depends: libgtk-3-0, libglib2.0-0, ddccontrol" >> package/DEBIAN/control
-	echo "Maintainer: DDC Automatic Brightness Team" >> package/DEBIAN/control
-	echo "Description: GUI application for automatic monitor brightness control" >> package/DEBIAN/control
-	echo " A GTK+ application that provides automatic brightness scheduling" >> package/DEBIAN/control
-	echo " for DDC/CI compatible monitors using ddccontrol." >> package/DEBIAN/control
+	# Create control file
+	echo "Package: $(PKG_NAME)" > package-deb/DEBIAN/control
+	echo "Version: $(PKG_VERSION)" >> package-deb/DEBIAN/control
+	echo "Section: utils" >> package-deb/DEBIAN/control
+	echo "Priority: optional" >> package-deb/DEBIAN/control
+	echo "Architecture: $(DEB_ARCH)" >> package-deb/DEBIAN/control
+	echo "Depends: libgtk-3-0, libglib2.0-0, libayatana-appindicator3-1, ddccontrol" >> package-deb/DEBIAN/control
+	echo "Recommends: libudev1" >> package-deb/DEBIAN/control
+	echo "Maintainer: $$(echo '$(PKG_MAINTAINER)')" >> package-deb/DEBIAN/control
+	echo "Homepage: $(PKG_HOMEPAGE)" >> package-deb/DEBIAN/control
+	echo "Description: $(PKG_DESC)" >> package-deb/DEBIAN/control
+	echo " $(PKG_LONG_DESC)" >> package-deb/DEBIAN/control
 	
-	chmod 755 package/DEBIAN
-	dpkg-deb --build package ddc-automatic-brightness-gtk_1.0.0_amd64.deb
-	rm -rf package
+	# Create postinst script for desktop integration
+	echo "#!/bin/bash" > package-deb/DEBIAN/postinst
+	echo "if command -v update-desktop-database >/dev/null 2>&1; then" >> package-deb/DEBIAN/postinst
+	echo "    update-desktop-database /usr/local/share/applications" >> package-deb/DEBIAN/postinst
+	echo "fi" >> package-deb/DEBIAN/postinst
+	chmod 755 package-deb/DEBIAN/postinst
+	
+	# Create postrm script
+	echo "#!/bin/bash" > package-deb/DEBIAN/postrm
+	echo "if command -v update-desktop-database >/dev/null 2>&1; then" >> package-deb/DEBIAN/postrm
+	echo "    update-desktop-database /usr/local/share/applications" >> package-deb/DEBIAN/postrm
+	echo "fi" >> package-deb/DEBIAN/postrm
+	chmod 755 package-deb/DEBIAN/postrm
+	
+	# Build package - fix permissions (work around SGID bit issue)
+	chmod g-s package-deb/DEBIAN
+	chmod 755 package-deb/DEBIAN
+	chmod 644 package-deb/DEBIAN/control
+	chmod 755 package-deb/DEBIAN/postinst package-deb/DEBIAN/postrm
+	dpkg-deb --build package-deb $(PKG_NAME)_$(PKG_VERSION)_$(DEB_ARCH).deb
+	rm -rf package-deb
+	@echo "✓ Created $(PKG_NAME)_$(PKG_VERSION)_$(DEB_ARCH).deb"
+
+# Package creation - .rpm format (Fedora/RHEL/SUSE)
+package-rpm: $(TARGET)
+	@echo "Creating .rpm package..."
+	@command -v rpmbuild >/dev/null || (echo "Error: rpmbuild not found. Install with: sudo apt install rpm" && exit 1)
+	rm -rf rpmbuild
+	mkdir -p rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
+	mkdir -p rpmbuild/BUILD/$(PKG_NAME)-$(PKG_VERSION)
+	mkdir -p rpmbuild/BUILD/$(PKG_NAME)-$(PKG_VERSION)/usr/local/bin
+	mkdir -p rpmbuild/BUILD/$(PKG_NAME)-$(PKG_VERSION)/usr/local/share/applications
+	mkdir -p rpmbuild/BUILD/$(PKG_NAME)-$(PKG_VERSION)/usr/local/share/pixmaps
+	mkdir -p rpmbuild/BUILD/$(PKG_NAME)-$(PKG_VERSION)/usr/local/share/doc/$(PKG_NAME)
+	
+	# Copy files
+	cp $(TARGET) rpmbuild/BUILD/$(PKG_NAME)-$(PKG_VERSION)/usr/local/bin/
+	cp ../ddc-automatic-brightness-gtk.desktop rpmbuild/BUILD/$(PKG_NAME)-$(PKG_VERSION)/usr/local/share/applications/
+	cp ../ddc-automatic-brightness-icon*.png rpmbuild/BUILD/$(PKG_NAME)-$(PKG_VERSION)/usr/local/share/pixmaps/
+	cp ../README.md rpmbuild/BUILD/$(PKG_NAME)-$(PKG_VERSION)/usr/local/share/doc/$(PKG_NAME)/
+	cp ../LICENSE rpmbuild/BUILD/$(PKG_NAME)-$(PKG_VERSION)/usr/local/share/doc/$(PKG_NAME)/
+	
+	# Create spec file
+	echo "Name: $(PKG_NAME)" > rpmbuild/SPECS/$(PKG_NAME).spec
+	echo "Version: $(PKG_VERSION)" >> rpmbuild/SPECS/$(PKG_NAME).spec
+	echo "Release: 1" >> rpmbuild/SPECS/$(PKG_NAME).spec
+	echo "Summary: $(PKG_DESC)" >> rpmbuild/SPECS/$(PKG_NAME).spec
+	echo "License: GPL-2.0" >> rpmbuild/SPECS/$(PKG_NAME).spec
+	echo "URL: $(PKG_HOMEPAGE)" >> rpmbuild/SPECS/$(PKG_NAME).spec
+	echo "BuildArch: $(RPM_ARCH)" >> rpmbuild/SPECS/$(PKG_NAME).spec
+	echo "Requires: gtk3, glib2, ddccontrol" >> rpmbuild/SPECS/$(PKG_NAME).spec
+	echo "Recommends: systemd-udev" >> rpmbuild/SPECS/$(PKG_NAME).spec
+	echo "" >> rpmbuild/SPECS/$(PKG_NAME).spec
+	echo "%description" >> rpmbuild/SPECS/$(PKG_NAME).spec
+	echo "$(PKG_LONG_DESC)" >> rpmbuild/SPECS/$(PKG_NAME).spec
+	echo "" >> rpmbuild/SPECS/$(PKG_NAME).spec
+	echo "%files" >> rpmbuild/SPECS/$(PKG_NAME).spec
+	echo "/usr/local/bin/$(TARGET)" >> rpmbuild/SPECS/$(PKG_NAME).spec
+	echo "/usr/local/share/applications/ddc-automatic-brightness-gtk.desktop" >> rpmbuild/SPECS/$(PKG_NAME).spec
+	echo "/usr/local/share/pixmaps/ddc-automatic-brightness-icon*.png" >> rpmbuild/SPECS/$(PKG_NAME).spec
+	echo "/usr/local/share/doc/$(PKG_NAME)/*" >> rpmbuild/SPECS/$(PKG_NAME).spec
+	echo "" >> rpmbuild/SPECS/$(PKG_NAME).spec
+	echo "%post" >> rpmbuild/SPECS/$(PKG_NAME).spec
+	echo "update-desktop-database /usr/local/share/applications 2>/dev/null || true" >> rpmbuild/SPECS/$(PKG_NAME).spec
+	echo "" >> rpmbuild/SPECS/$(PKG_NAME).spec
+	echo "%postun" >> rpmbuild/SPECS/$(PKG_NAME).spec
+	echo "update-desktop-database /usr/local/share/applications 2>/dev/null || true" >> rpmbuild/SPECS/$(PKG_NAME).spec
+	
+	# Build RPM
+	rpmbuild --define "_topdir $(shell pwd)/rpmbuild" --bb rpmbuild/SPECS/$(PKG_NAME).spec
+	cp rpmbuild/RPMS/$(RPM_ARCH)/$(PKG_NAME)-$(PKG_VERSION)-1.$(RPM_ARCH).rpm .
+	rm -rf rpmbuild
+	@echo "✓ Created $(PKG_NAME)-$(PKG_VERSION)-1.$(RPM_ARCH).rpm"
+
+# Package creation - Arch Linux (PKGBUILD)
+package-arch: $(TARGET)
+	@echo "Creating Arch Linux PKGBUILD..."
+	rm -rf arch-package
+	mkdir -p arch-package
+	
+	# Create PKGBUILD
+	echo "# Maintainer: $$(echo '$(PKG_MAINTAINER)')" > arch-package/PKGBUILD
+	echo "pkgname=$(PKG_NAME)" >> arch-package/PKGBUILD
+	echo "pkgver=$(PKG_VERSION)" >> arch-package/PKGBUILD
+	echo "pkgrel=1" >> arch-package/PKGBUILD
+	echo "pkgdesc=\"$(PKG_DESC)\"" >> arch-package/PKGBUILD
+	echo "arch=('x86_64' 'aarch64')" >> arch-package/PKGBUILD
+	echo "url=\"$(PKG_HOMEPAGE)\"" >> arch-package/PKGBUILD
+	echo "license=('GPL2')" >> arch-package/PKGBUILD
+	echo "depends=('gtk3' 'glib2' 'libayatana-appindicator' 'ddccontrol')" >> arch-package/PKGBUILD
+	echo "optdepends=('systemd: hardware auto-detection support')" >> arch-package/PKGBUILD
+	echo "source=()" >> arch-package/PKGBUILD
+	echo "md5sums=()" >> arch-package/PKGBUILD
+	echo "" >> arch-package/PKGBUILD
+	echo "package() {" >> arch-package/PKGBUILD
+	echo "    # This PKGBUILD is for reference - actual implementation would build from source" >> arch-package/PKGBUILD
+	echo "    install -Dm755 \"\$$srcdir/$(TARGET)\" \"\$$pkgdir/usr/local/bin/$(TARGET)\"" >> arch-package/PKGBUILD
+	echo "    install -Dm644 \"\$$srcdir/ddc-automatic-brightness-gtk.desktop\" \"\$$pkgdir/usr/local/share/applications/ddc-automatic-brightness-gtk.desktop\"" >> arch-package/PKGBUILD
+	echo "    install -Dm644 \"\$$srcdir/ddc-automatic-brightness-icon.png\" \"\$$pkgdir/usr/local/share/pixmaps/ddc-automatic-brightness-icon.png\"" >> arch-package/PKGBUILD
+	echo "    install -Dm644 \"\$$srcdir/README.md\" \"\$$pkgdir/usr/local/share/doc/\$$pkgname/README.md\"" >> arch-package/PKGBUILD
+	echo "    install -Dm644 \"\$$srcdir/LICENSE\" \"\$$pkgdir/usr/local/share/doc/\$$pkgname/LICENSE\"" >> arch-package/PKGBUILD
+	echo "}" >> arch-package/PKGBUILD
+	@echo "✓ Created arch-package/PKGBUILD"
+
+# Package creation - AppImage (Portable)
+package-appimage: $(TARGET)
+	@echo "Creating AppImage..."
+	@command -v linuxdeploy >/dev/null || (echo "Warning: linuxdeploy not found. Download from https://github.com/linuxdeploy/linuxdeploy/releases" && exit 1)
+	rm -rf appimage-build
+	mkdir -p appimage-build
+	
+	# Create AppDir structure
+	mkdir -p appimage-build/AppDir/usr/bin
+	mkdir -p appimage-build/AppDir/usr/share/applications
+	mkdir -p appimage-build/AppDir/usr/share/pixmaps
+	
+	# Copy files
+	cp $(TARGET) appimage-build/AppDir/usr/bin/
+	cp ../ddc-automatic-brightness-gtk.desktop appimage-build/AppDir/usr/share/applications/
+	cp ../ddc-automatic-brightness-icon.png appimage-build/AppDir/usr/share/pixmaps/
+	
+	# Create AppRun
+	echo "#!/bin/bash" > appimage-build/AppDir/AppRun
+	echo "cd \"\$$(dirname \"\$$0\")\"" >> appimage-build/AppDir/AppRun
+	echo "exec ./usr/bin/$(TARGET) \"\$$@\"" >> appimage-build/AppDir/AppRun
+	chmod +x appimage-build/AppDir/AppRun
+	
+	# Create desktop file for AppImage
+	cp ../ddc-automatic-brightness-gtk.desktop appimage-build/AppDir/
+	cp ../ddc-automatic-brightness-icon.png appimage-build/AppDir/
+	
+	# Build AppImage (if linuxdeploy is available)
+	cd appimage-build && linuxdeploy --appdir AppDir --output appimage || echo "AppImage creation requires linuxdeploy"
+	@echo "✓ AppImage build prepared in appimage-build/"
+
+# Package creation - Flatpak manifest
+package-flatpak: $(TARGET)
+	@echo "Creating Flatpak manifest..."
+	rm -rf flatpak-build
+	mkdir -p flatpak-build
+	
+	# Create Flatpak manifest
+	echo "{" > flatpak-build/com.github.ddcbrightness.DDCAutomaticBrightness.json
+	echo "    \"app-id\": \"com.github.ddcbrightness.DDCAutomaticBrightness\"," >> flatpak-build/com.github.ddcbrightness.DDCAutomaticBrightness.json
+	echo "    \"runtime\": \"org.gnome.Platform\"," >> flatpak-build/com.github.ddcbrightness.DDCAutomaticBrightness.json
+	echo "    \"runtime-version\": \"44\"," >> flatpak-build/com.github.ddcbrightness.DDCAutomaticBrightness.json
+	echo "    \"sdk\": \"org.gnome.Sdk\"," >> flatpak-build/com.github.ddcbrightness.DDCAutomaticBrightness.json
+	echo "    \"command\": \"$(TARGET)\"," >> flatpak-build/com.github.ddcbrightness.DDCAutomaticBrightness.json
+	echo "    \"finish-args\": [" >> flatpak-build/com.github.ddcbrightness.DDCAutomaticBrightness.json
+	echo "        \"--share=ipc\"," >> flatpak-build/com.github.ddcbrightness.DDCAutomaticBrightness.json
+	echo "        \"--socket=x11\"," >> flatpak-build/com.github.ddcbrightness.DDCAutomaticBrightness.json
+	echo "        \"--socket=wayland\"," >> flatpak-build/com.github.ddcbrightness.DDCAutomaticBrightness.json
+	echo "        \"--device=all\"," >> flatpak-build/com.github.ddcbrightness.DDCAutomaticBrightness.json
+	echo "        \"--filesystem=home\"," >> flatpak-build/com.github.ddcbrightness.DDCAutomaticBrightness.json
+	echo "        \"--talk-name=org.freedesktop.Notifications\"" >> flatpak-build/com.github.ddcbrightness.DDCAutomaticBrightness.json
+	echo "    ]," >> flatpak-build/com.github.ddcbrightness.DDCAutomaticBrightness.json
+	echo "    \"modules\": [" >> flatpak-build/com.github.ddcbrightness.DDCAutomaticBrightness.json
+	echo "        {" >> flatpak-build/com.github.ddcbrightness.DDCAutomaticBrightness.json
+	echo "            \"name\": \"ddc-automatic-brightness\"," >> flatpak-build/com.github.ddcbrightness.DDCAutomaticBrightness.json
+	echo "            \"buildsystem\": \"simple\"," >> flatpak-build/com.github.ddcbrightness.DDCAutomaticBrightness.json
+	echo "            \"build-commands\": [" >> flatpak-build/com.github.ddcbrightness.DDCAutomaticBrightness.json
+	echo "                \"install -Dm755 $(TARGET) /app/bin/$(TARGET)\"," >> flatpak-build/com.github.ddcbrightness.DDCAutomaticBrightness.json
+	echo "                \"install -Dm644 ddc-automatic-brightness-gtk.desktop /app/share/applications/com.github.ddcbrightness.DDCAutomaticBrightness.desktop\"," >> flatpak-build/com.github.ddcbrightness.DDCAutomaticBrightness.json
+	echo "                \"install -Dm644 ddc-automatic-brightness-icon.png /app/share/pixmaps/ddc-automatic-brightness-icon.png\"" >> flatpak-build/com.github.ddcbrightness.DDCAutomaticBrightness.json
+	echo "            ]," >> flatpak-build/com.github.ddcbrightness.DDCAutomaticBrightness.json
+	echo "            \"sources\": [" >> flatpak-build/com.github.ddcbrightness.DDCAutomaticBrightness.json
+	echo "                {" >> flatpak-build/com.github.ddcbrightness.DDCAutomaticBrightness.json
+	echo "                    \"type\": \"file\"," >> flatpak-build/com.github.ddcbrightness.DDCAutomaticBrightness.json
+	echo "                    \"path\": \"$(TARGET)\"" >> flatpak-build/com.github.ddcbrightness.DDCAutomaticBrightness.json
+	echo "                }," >> flatpak-build/com.github.ddcbrightness.DDCAutomaticBrightness.json
+	echo "                {" >> flatpak-build/com.github.ddcbrightness.DDCAutomaticBrightness.json
+	echo "                    \"type\": \"file\"," >> flatpak-build/com.github.ddcbrightness.DDCAutomaticBrightness.json
+	echo "                    \"path\": \"../ddc-automatic-brightness-gtk.desktop\"" >> flatpak-build/com.github.ddcbrightness.DDCAutomaticBrightness.json
+	echo "                }," >> flatpak-build/com.github.ddcbrightness.DDCAutomaticBrightness.json
+	echo "                {" >> flatpak-build/com.github.ddcbrightness.DDCAutomaticBrightness.json
+	echo "                    \"type\": \"file\"," >> flatpak-build/com.github.ddcbrightness.DDCAutomaticBrightness.json
+	echo "                    \"path\": \"../ddc-automatic-brightness-icon.png\"" >> flatpak-build/com.github.ddcbrightness.DDCAutomaticBrightness.json
+	echo "                }" >> flatpak-build/com.github.ddcbrightness.DDCAutomaticBrightness.json
+	echo "            ]" >> flatpak-build/com.github.ddcbrightness.DDCAutomaticBrightness.json
+	echo "        }" >> flatpak-build/com.github.ddcbrightness.DDCAutomaticBrightness.json
+	echo "    ]" >> flatpak-build/com.github.ddcbrightness.DDCAutomaticBrightness.json
+	echo "}" >> flatpak-build/com.github.ddcbrightness.DDCAutomaticBrightness.json
+	@echo "✓ Created flatpak-build/com.github.ddcbrightness.DDCAutomaticBrightness.json"
+
+# Package creation - Snap (Ubuntu/Universal)
+package-snap: $(TARGET)
+	@echo "Creating Snap package..."
+	rm -rf snap-build
+	mkdir -p snap-build
+	
+	# Create snapcraft.yaml
+	echo "name: ddc-automatic-brightness" > snap-build/snapcraft.yaml
+	echo "version: '$(PKG_VERSION)'" >> snap-build/snapcraft.yaml
+	echo "summary: $(PKG_DESC)" >> snap-build/snapcraft.yaml
+	echo "description: |" >> snap-build/snapcraft.yaml
+	echo "  $(PKG_LONG_DESC)" >> snap-build/snapcraft.yaml
+	echo "" >> snap-build/snapcraft.yaml
+	echo "grade: stable" >> snap-build/snapcraft.yaml
+	echo "confinement: classic" >> snap-build/snapcraft.yaml
+	echo "base: core20" >> snap-build/snapcraft.yaml
+	echo "" >> snap-build/snapcraft.yaml
+	echo "parts:" >> snap-build/snapcraft.yaml
+	echo "  ddc-brightness:" >> snap-build/snapcraft.yaml
+	echo "    plugin: dump" >> snap-build/snapcraft.yaml
+	echo "    source: ." >> snap-build/snapcraft.yaml
+	echo "    organize:" >> snap-build/snapcraft.yaml
+	echo "      $(TARGET): bin/$(TARGET)" >> snap-build/snapcraft.yaml
+	echo "      ../ddc-automatic-brightness-gtk.desktop: share/applications/ddc-automatic-brightness-gtk.desktop" >> snap-build/snapcraft.yaml
+	echo "      ../ddc-automatic-brightness-icon.png: share/pixmaps/ddc-automatic-brightness-icon.png" >> snap-build/snapcraft.yaml
+	echo "" >> snap-build/snapcraft.yaml
+	echo "apps:" >> snap-build/snapcraft.yaml
+	echo "  ddc-automatic-brightness:" >> snap-build/snapcraft.yaml
+	echo "    command: bin/$(TARGET)" >> snap-build/snapcraft.yaml
+	echo "    desktop: share/applications/ddc-automatic-brightness-gtk.desktop" >> snap-build/snapcraft.yaml
+	@echo "✓ Created snap-build/snapcraft.yaml"
+
+# Create all packages
+package-all: package-deb package-rpm package-arch package-appimage package-flatpak package-snap
+	@echo "✓ All package formats created!"
+
+# Legacy package target (creates .deb)
+package: package-deb
 
 # Development targets
 debug: CFLAGS += -g -DDEBUG
@@ -133,14 +380,25 @@ test: $(TARGET)
 # Show help
 help:
 	@echo "Available targets:"
-	@echo "  all          - Build the application (default)"
-	@echo "  check-deps   - Check if all dependencies are installed"
-	@echo "  install      - Install the application system-wide"
-	@echo "  uninstall    - Remove the application from system"
-	@echo "  clean        - Remove build files"
-	@echo "  package      - Create a .deb package"
-	@echo "  debug        - Build with debug symbols"
-	@echo "  test         - Run basic tests"
-	@echo "  help         - Show this help"
+	@echo "  all               - Build the application (default)"
+	@echo "  check-deps        - Check if all dependencies are installed"
+	@echo "  install           - Install the application system-wide"
+	@echo "  uninstall         - Remove the application from system"
+	@echo "  clean             - Remove build files"
+	@echo ""
+	@echo "Package creation:"
+	@echo "  package           - Create .deb package (default)"
+	@echo "  package-deb       - Create .deb package (Debian/Ubuntu)"
+	@echo "  package-rpm       - Create .rpm package (Fedora/RHEL/SUSE)"
+	@echo "  package-arch      - Create PKGBUILD (Arch Linux)"
+	@echo "  package-appimage  - Create AppImage (Portable)"
+	@echo "  package-flatpak   - Create Flatpak manifest"
+	@echo "  package-snap      - Create Snap package manifest"
+	@echo "  package-all       - Create all package formats"
+	@echo ""
+	@echo "Development:"
+	@echo "  debug             - Build with debug symbols"
+	@echo "  test              - Run basic tests"
+	@echo "  help              - Show this help"
 
-.PHONY: all check-deps install uninstall clean package debug test help
+.PHONY: all check-deps install uninstall clean package package-deb package-rpm package-arch package-appimage package-flatpak package-snap package-all debug test help

@@ -25,3 +25,4 @@ Thumbs.db
 # User config files
 *.conf.bak
 *.conf~
+.claude
