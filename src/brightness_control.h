@@ -26,6 +26,11 @@ int monitor_get_brightness(Monitor *monitor);
 gboolean monitor_set_brightness(Monitor *monitor, int brightness);
 gboolean monitor_is_available(Monitor *monitor);
 
+/* Enhanced functions with auto-refresh capability */
+typedef gboolean (*MonitorRefreshCallback)(void);
+int monitor_get_brightness_with_retry(Monitor *monitor, MonitorRefreshCallback refresh_callback);
+gboolean monitor_set_brightness_with_retry(Monitor *monitor, int brightness, MonitorRefreshCallback refresh_callback);
+
 /* Monitor list functions */
 MonitorList* monitor_list_new(void);
 void monitor_list_free(MonitorList *list);

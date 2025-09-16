@@ -90,6 +90,7 @@ static void setup_ui(void);
 static void load_monitors(void);
 static gboolean load_monitors_with_retry(gpointer data);
 static gboolean recheck_monitors_immediately(gpointer data);
+static gboolean auto_refresh_monitors_on_failure(void);
 static void update_brightness_display(void);
 static gboolean on_window_delete_event(GtkWidget *widget, GdkEvent *event, gpointer data);
 #if HAVE_LIBUDEV
@@ -249,7 +250,7 @@ static void on_monitor_changed(GtkComboBox *combo, gpointer data)
                                      monitor_get_device_path(app_data.current_monitor));
             
             /* Read current brightness */
-            int brightness = monitor_get_brightness(app_data.current_monitor);
+            int brightness = monitor_get_brightness_with_retry(app_data.current_monitor, auto_refresh_monitors_on_failure);
             if (brightness >= 0) {
                 app_data.updating_from_auto = TRUE;
                 gtk_range_set_value(GTK_RANGE(app_data.brightness_scale), brightness);
@@ -275,7 +276,7 @@ static void on_brightness_changed(GtkRange *range, gpointer data)
     
     if (app_data.current_monitor) {
         int brightness = (int)gtk_range_get_value(range);
-        monitor_set_brightness(app_data.current_monitor, brightness);
+        monitor_set_brightness_with_retry(app_data.current_monitor, brightness, auto_refresh_monitors_on_failure);
         update_brightness_display();
         
         /* Disable auto brightness when user manually adjusts */
@@ -308,7 +309,7 @@ static void on_auto_brightness_toggled(GtkToggleButton *button, gpointer data)
             /* Apply current scheduled brightness immediately */
             int target_brightness = scheduler_get_current_brightness(app_data.scheduler);
             if (target_brightness >= 0) {
-                monitor_set_brightness(app_data.current_monitor, target_brightness);
+                monitor_set_brightness_with_retry(app_data.current_monitor, target_brightness, auto_refresh_monitors_on_failure);
                 app_data.updating_from_auto = TRUE;
                 gtk_range_set_value(GTK_RANGE(app_data.brightness_scale), target_brightness);
                 app_data.updating_from_auto = FALSE;
@@ -366,7 +367,7 @@ static gboolean auto_brightness_timer_callback(gpointer data)
                 /* Apply scheduled brightness to this monitor */
                 int target_brightness = scheduler_get_current_brightness(app_data.scheduler);
                 if (target_brightness >= 0) {
-                    monitor_set_brightness(monitor, target_brightness);
+                    monitor_set_brightness_with_retry(monitor, target_brightness, auto_refresh_monitors_on_failure);
                     
                     /* Update UI if this is the current monitor */
                     if (monitor == app_data.current_monitor) {
@@ -719,6 +720,61 @@ static gboolean recheck_monitors_immediately(gpointer data)
     return FALSE; /* Single execution */
 }
 
+/* Auto-refresh monitors when DDC communication fails */
+static gboolean auto_refresh_monitors_on_failure(void)
+{
+    g_message("DDC communication failed, auto-refreshing monitors...");
+
+    /* Save current state */
+    gboolean had_monitors = app_data.monitors_found;
+    const char *current_device_path = NULL;
+    if (app_data.current_monitor) {
+        current_device_path = monitor_get_device_path(app_data.current_monitor);
+    }
+
+    /* Refresh monitors */
+    load_monitors();
+
+    /* Try to restore the same monitor selection if possible */
+    if (current_device_path && app_data.monitors && monitor_list_get_count(app_data.monitors) > 0) {
+        for (int i = 0; i < monitor_list_get_count(app_data.monitors); i++) {
+            Monitor *monitor = monitor_list_get_monitor(app_data.monitors, i);
+            if (strcmp(monitor_get_device_path(monitor), current_device_path) == 0) {
+                gtk_combo_box_set_active(GTK_COMBO_BOX(app_data.monitor_combo), i);
+                break;
+            }
+        }
+    }
+
+    /* Check if we successfully found monitors after refresh */
+    if (app_data.monitors_found) {
+        g_message("Monitor refresh successful");
+        return TRUE;
+    } else {
+        g_message("Monitor refresh failed - no monitors found");
+
+        /* Update UI to reflect no monitors available */
+        app_data.current_monitor = NULL;
+
+        /* Clear combo box */
+        GtkTreeModel *model = gtk_combo_box_get_model(GTK_COMBO_BOX(app_data.monitor_combo));
+        if (model) {
+            gtk_list_store_clear(GTK_LIST_STORE(model));
+        }
+
+        /* Reset brightness display */
+        gtk_range_set_value(GTK_RANGE(app_data.brightness_scale), 50);
+        update_brightness_display();
+
+#if HAVE_APPINDICATOR
+        /* Update tray icon to show "X" */
+        update_tray_icon_label();
+#endif
+
+        return FALSE;
+    }
+}
+
 /* Update brightness percentage display */
 static void update_brightness_display(void)
 {
@@ -899,7 +955,7 @@ static void on_indicator_brightness_20(GtkMenuItem *item, gpointer data)
 {
     (void)item; (void)data;
     if (app_data.current_monitor) {
-        monitor_set_brightness(app_data.current_monitor, 20);
+        monitor_set_brightness_with_retry(app_data.current_monitor, 20, auto_refresh_monitors_on_failure);
         app_data.updating_from_auto = TRUE;
         gtk_range_set_value(GTK_RANGE(app_data.brightness_scale), 20);
         app_data.updating_from_auto = FALSE;
@@ -916,7 +972,7 @@ static void on_indicator_brightness_25(GtkMenuItem *item, gpointer data)
 {
     (void)item; (void)data;
     if (app_data.current_monitor) {
-        monitor_set_brightness(app_data.current_monitor, 25);
+        monitor_set_brightness_with_retry(app_data.current_monitor, 25, auto_refresh_monitors_on_failure);
         app_data.updating_from_auto = TRUE;
         gtk_range_set_value(GTK_RANGE(app_data.brightness_scale), 25);
         app_data.updating_from_auto = FALSE;
@@ -933,7 +989,7 @@ static void on_indicator_brightness_50(GtkMenuItem *item, gpointer data)
 {
     (void)item; (void)data;
     if (app_data.current_monitor) {
-        monitor_set_brightness(app_data.current_monitor, 50);
+        monitor_set_brightness_with_retry(app_data.current_monitor, 50, auto_refresh_monitors_on_failure);
         app_data.updating_from_auto = TRUE;
         gtk_range_set_value(GTK_RANGE(app_data.brightness_scale), 50);
         app_data.updating_from_auto = FALSE;
@@ -950,7 +1006,7 @@ static void on_indicator_brightness_35(GtkMenuItem *item, gpointer data)
 {
     (void)item; (void)data;
     if (app_data.current_monitor) {
-        monitor_set_brightness(app_data.current_monitor, 35);
+        monitor_set_brightness_with_retry(app_data.current_monitor, 35, auto_refresh_monitors_on_failure);
         app_data.updating_from_auto = TRUE;
         gtk_range_set_value(GTK_RANGE(app_data.brightness_scale), 35);
         app_data.updating_from_auto = FALSE;
@@ -967,7 +1023,7 @@ static void on_indicator_brightness_70(GtkMenuItem *item, gpointer data)
 {
     (void)item; (void)data;
     if (app_data.current_monitor) {
-        monitor_set_brightness(app_data.current_monitor, 70);
+        monitor_set_brightness_with_retry(app_data.current_monitor, 70, auto_refresh_monitors_on_failure);
         app_data.updating_from_auto = TRUE;
         gtk_range_set_value(GTK_RANGE(app_data.brightness_scale), 70);
         app_data.updating_from_auto = FALSE;
@@ -984,7 +1040,7 @@ static void on_indicator_brightness_100(GtkMenuItem *item, gpointer data)
 {
     (void)item; (void)data;
     if (app_data.current_monitor) {
-        monitor_set_brightness(app_data.current_monitor, 100);
+        monitor_set_brightness_with_retry(app_data.current_monitor, 100, auto_refresh_monitors_on_failure);
         app_data.updating_from_auto = TRUE;
         gtk_range_set_value(GTK_RANGE(app_data.brightness_scale), 100);
         app_data.updating_from_auto = FALSE;
@@ -1024,8 +1080,8 @@ static void update_tray_icon_label(void)
     }
     
     /* Check if monitors are available */
-    if (!app_data.monitors_found || !app_data.current_monitor) {
-        /* Show "X" to indicate no monitors found */
+    if (!app_data.monitors_found || !app_data.current_monitor || !monitor_is_available(app_data.current_monitor)) {
+        /* Show "X" to indicate no monitors found or current monitor unavailable */
         app_indicator_set_label(app_data.indicator, "X", "X");
         return;
     }

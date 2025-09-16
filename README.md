@@ -7,7 +7,6 @@ An application for controlling monitor brightness using ddccontrol with automati
 ✅ **Smart Monitor Detection**: Automatic DDC/CI monitor discovery  
 ✅ **Hardware Auto-Detection**: Real-time detection of newly connected monitors via udev (when available)  
 ✅ **Enhanced Tray Integration**: Full tray support with brightness controls and schedule preview  
-✅ **Schedule Transparency**: Tray menu shows current scheduled brightness even when auto-brightness is disabled  
 ✅ **Brightness Control**: Real-time brightness adjustment with slider  
 ✅ **Automatic Scheduling**: Progressive brightness adjustment throughout the day  
 ✅ **Startup Options**: Run minimized to tray, --help, --tray modes  

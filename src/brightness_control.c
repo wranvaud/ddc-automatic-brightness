@@ -144,6 +144,66 @@ gboolean monitor_is_available(Monitor *monitor)
     return monitor ? monitor->available : FALSE;
 }
 
+/* Get brightness with auto-refresh retry capability */
+int monitor_get_brightness_with_retry(Monitor *monitor, MonitorRefreshCallback refresh_callback)
+{
+    if (!monitor) {
+        return -1;
+    }
+
+    /* First attempt */
+    int brightness = monitor_get_brightness(monitor);
+
+    /* If first attempt failed and we have a refresh callback, try auto-refresh */
+    if (brightness < 0 && refresh_callback && monitor->available == FALSE) {
+        g_message("Brightness read failed, attempting auto-refresh...");
+
+        if (refresh_callback()) {
+            /* Refresh succeeded, try again */
+            g_message("Auto-refresh successful, retrying brightness read...");
+            brightness = monitor_get_brightness(monitor);
+
+            if (brightness >= 0) {
+                g_message("Brightness read successful after auto-refresh");
+            } else {
+                g_warning("Brightness read failed even after auto-refresh");
+            }
+        }
+    }
+
+    return brightness;
+}
+
+/* Set brightness with auto-refresh retry capability */
+gboolean monitor_set_brightness_with_retry(Monitor *monitor, int brightness, MonitorRefreshCallback refresh_callback)
+{
+    if (!monitor) {
+        return FALSE;
+    }
+
+    /* First attempt */
+    gboolean success = monitor_set_brightness(monitor, brightness);
+
+    /* If first attempt failed and we have a refresh callback, try auto-refresh */
+    if (!success && refresh_callback && monitor->available == FALSE) {
+        g_message("Brightness set failed, attempting auto-refresh...");
+
+        if (refresh_callback()) {
+            /* Refresh succeeded, try again */
+            g_message("Auto-refresh successful, retrying brightness set...");
+            success = monitor_set_brightness(monitor, brightness);
+
+            if (success) {
+                g_message("Brightness set successful after auto-refresh");
+            } else {
+                g_warning("Brightness set failed even after auto-refresh");
+            }
+        }
+    }
+
+    return success;
+}
+
 /* Create new monitor list */
 MonitorList* monitor_list_new(void)
 {
