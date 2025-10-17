@@ -6,6 +6,7 @@
 #define CONFIG_H
 
 #include <glib.h>
+#include "light_sensor.h"
 
 G_BEGIN_DECLS
 
@@ -32,9 +33,29 @@ void config_set_start_minimized(AppConfig *config, gboolean minimized);
 gboolean config_get_show_brightness_in_tray(AppConfig *config);
 void config_set_show_brightness_in_tray(AppConfig *config, gboolean show);
 
+gboolean config_get_show_light_level_in_tray(AppConfig *config);
+void config_set_show_light_level_in_tray(AppConfig *config, gboolean show);
+
 /* Per-monitor settings */
 gboolean config_get_monitor_auto_brightness(AppConfig *config, const char *device_path);
 void config_set_monitor_auto_brightness(AppConfig *config, const char *device_path, gboolean enabled);
+
+AutoBrightnessMode config_get_monitor_auto_brightness_mode(AppConfig *config, const char *device_path);
+void config_set_monitor_auto_brightness_mode(AppConfig *config, const char *device_path, AutoBrightnessMode mode);
+
+int config_get_monitor_brightness_offset(AppConfig *config, const char *device_path);
+void config_set_monitor_brightness_offset(AppConfig *config, const char *device_path, int offset);
+
+/* Light sensor curve settings - per monitor */
+typedef struct {
+    double lux;
+    int brightness;  /* 0-100 */
+} LightSensorCurvePoint;
+
+gboolean config_load_light_sensor_curve(AppConfig *config, const char *device_path,
+                                        LightSensorCurvePoint **points, int *count);
+void config_save_light_sensor_curve(AppConfig *config, const char *device_path,
+                                   const LightSensorCurvePoint *points, int count);
 
 /* Schedule settings */
 GKeyFile* config_get_keyfile(AppConfig *config);

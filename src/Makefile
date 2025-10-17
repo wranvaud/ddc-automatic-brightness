@@ -36,11 +36,11 @@ LDFLAGS = $(shell pkg-config --libs gtk+-3.0 glib-2.0) $(APPINDICATOR_LDFLAGS) $
 TARGET = ddc-automatic-brightness-gtk
 
 # Source files
-SOURCES = main.c brightness_control.c monitor_detect.c config.c scheduler.c schedule_dialog.c
+SOURCES = main.c brightness_control.c monitor_detect.c config.c scheduler.c schedule_dialog.c light_sensor.c light_sensor_dialog.c laptop_backlight.c
 OBJECTS = $(SOURCES:.c=.o)
 
 # Header files
-HEADERS = brightness_control.h monitor_detect.h config.h scheduler.h
+HEADERS = brightness_control.h monitor_detect.h config.h scheduler.h light_sensor.h light_sensor_dialog.h laptop_backlight.h
 
 # Default target
 all: $(TARGET)

@@ -248,12 +248,48 @@ void config_set_show_brightness_in_tray(AppConfig *config, gboolean show)
     if (!config) {
         return;
     }
-    
+
     g_key_file_set_boolean(config->keyfile,
                           CONFIG_GROUP_GENERAL,
                           "show_brightness_in_tray",
                           show);
-    
+
+    config->modified = TRUE;
+}
+
+/* Get show light level in tray setting */
+gboolean config_get_show_light_level_in_tray(AppConfig *config)
+{
+    if (!config) {
+        return FALSE;
+    }
+
+    GError *error = NULL;
+    gboolean value = g_key_file_get_boolean(config->keyfile,
+                                           CONFIG_GROUP_GENERAL,
+                                           "show_light_level_in_tray",
+                                           &error);
+
+    if (error) {
+        g_error_free(error);
+        return FALSE;  /* Default to not showing light level in tray */
+    }
+
+    return value;
+}
+
+/* Set show light level in tray setting */
+void config_set_show_light_level_in_tray(AppConfig *config, gboolean show)
+{
+    if (!config) {
+        return;
+    }
+
+    g_key_file_set_boolean(config->keyfile,
+                          CONFIG_GROUP_GENERAL,
+                          "show_light_level_in_tray",
+                          show);
+
     config->modified = TRUE;
 }
 
@@ -297,6 +333,216 @@ void config_set_monitor_auto_brightness(AppConfig *config, const char *device_pa
                           enabled);
     
     g_free(key);
+    config->modified = TRUE;
+}
+
+/* Get per-monitor auto brightness mode */
+AutoBrightnessMode config_get_monitor_auto_brightness_mode(AppConfig *config, const char *device_path)
+{
+    if (!config || !device_path) {
+        return AUTO_BRIGHTNESS_MODE_DISABLED;
+    }
+
+    char *key = g_strdup_printf("%s_auto_brightness_mode", device_path);
+
+    GError *error = NULL;
+    int value = g_key_file_get_integer(config->keyfile,
+                                       CONFIG_GROUP_MONITORS,
+                                       key,
+                                       &error);
+
+    g_free(key);
+
+    if (error) {
+        g_error_free(error);
+
+        /* Check for legacy config: if old auto_brightness was enabled, default to time schedule */
+        if (config_get_monitor_auto_brightness(config, device_path)) {
+            return AUTO_BRIGHTNESS_MODE_TIME_SCHEDULE;
+        }
+
+        return AUTO_BRIGHTNESS_MODE_DISABLED;
+    }
+
+    /* Validate mode value */
+    if (value < AUTO_BRIGHTNESS_MODE_DISABLED || value > AUTO_BRIGHTNESS_MODE_LAPTOP_DISPLAY) {
+        return AUTO_BRIGHTNESS_MODE_DISABLED;
+    }
+
+    return (AutoBrightnessMode)value;
+}
+
+/* Set per-monitor auto brightness mode */
+void config_set_monitor_auto_brightness_mode(AppConfig *config, const char *device_path, AutoBrightnessMode mode)
+{
+    if (!config || !device_path) {
+        return;
+    }
+
+    char *key = g_strdup_printf("%s_auto_brightness_mode", device_path);
+
+    g_key_file_set_integer(config->keyfile,
+                           CONFIG_GROUP_MONITORS,
+                           key,
+                           (int)mode);
+
+    g_free(key);
+
+    /* Also update the legacy boolean setting for backward compatibility */
+    config_set_monitor_auto_brightness(config, device_path, mode != AUTO_BRIGHTNESS_MODE_DISABLED);
+
+    config->modified = TRUE;
+}
+
+/* Get per-monitor brightness offset */
+int config_get_monitor_brightness_offset(AppConfig *config, const char *device_path)
+{
+    if (!config || !device_path) {
+        return 0; /* Default to no offset */
+    }
+
+    char *key = g_strdup_printf("%s_brightness_offset", device_path);
+
+    GError *error = NULL;
+    int value = g_key_file_get_integer(config->keyfile,
+                                       CONFIG_GROUP_MONITORS,
+                                       key,
+                                       &error);
+
+    g_free(key);
+
+    if (error) {
+        g_error_free(error);
+        return 0; /* Default to no offset */
+    }
+
+    /* Clamp value to -20 to +20 range */
+    if (value < -20) value = -20;
+    if (value > 20) value = 20;
+
+    return value;
+}
+
+/* Set per-monitor brightness offset */
+void config_set_monitor_brightness_offset(AppConfig *config, const char *device_path, int offset)
+{
+    if (!config || !device_path) {
+        return;
+    }
+
+    /* Clamp offset to -20 to +20 range */
+    if (offset < -20) offset = -20;
+    if (offset > 20) offset = 20;
+
+    char *key = g_strdup_printf("%s_brightness_offset", device_path);
+
+    g_key_file_set_integer(config->keyfile,
+                           CONFIG_GROUP_MONITORS,
+                           key,
+                           offset);
+
+    g_free(key);
+    config->modified = TRUE;
+}
+
+/* Load light sensor curve for a specific monitor */
+gboolean config_load_light_sensor_curve(AppConfig *config, const char *device_path,
+                                        LightSensorCurvePoint **points, int *count)
+{
+    if (!config || !device_path || !points || !count) {
+        return FALSE;
+    }
+
+    *points = NULL;
+    *count = 0;
+
+    /* Build the group name for this monitor's curve */
+    char *group = g_strdup_printf("LightSensorCurve_%s", device_path);
+
+    /* Check if this group exists */
+    if (!g_key_file_has_group(config->keyfile, group)) {
+        g_free(group);
+        return FALSE;  /* No curve configured, will use defaults */
+    }
+
+    /* Get the number of points */
+    GError *error = NULL;
+    int num_points = g_key_file_get_integer(config->keyfile, group, "num_points", &error);
+    if (error || num_points <= 0) {
+        g_clear_error(&error);
+        g_free(group);
+        return FALSE;
+    }
+
+    /* Allocate array for points */
+    LightSensorCurvePoint *curve_points = g_new(LightSensorCurvePoint, num_points);
+
+    /* Load each point */
+    for (int i = 0; i < num_points; i++) {
+        char *lux_key = g_strdup_printf("point_%d_lux", i);
+        char *brightness_key = g_strdup_printf("point_%d_brightness", i);
+
+        curve_points[i].lux = g_key_file_get_double(config->keyfile, group, lux_key, &error);
+        if (error) {
+            g_clear_error(&error);
+            g_free(lux_key);
+            g_free(brightness_key);
+            g_free(curve_points);
+            g_free(group);
+            return FALSE;
+        }
+
+        curve_points[i].brightness = g_key_file_get_integer(config->keyfile, group, brightness_key, &error);
+        if (error) {
+            g_clear_error(&error);
+            g_free(lux_key);
+            g_free(brightness_key);
+            g_free(curve_points);
+            g_free(group);
+            return FALSE;
+        }
+
+        g_free(lux_key);
+        g_free(brightness_key);
+    }
+
+    g_free(group);
+
+    *points = curve_points;
+    *count = num_points;
+    return TRUE;
+}
+
+/* Save light sensor curve for a specific monitor */
+void config_save_light_sensor_curve(AppConfig *config, const char *device_path,
+                                   const LightSensorCurvePoint *points, int count)
+{
+    if (!config || !device_path || !points || count <= 0) {
+        return;
+    }
+
+    /* Build the group name for this monitor's curve */
+    char *group = g_strdup_printf("LightSensorCurve_%s", device_path);
+
+    /* Remove existing group if present */
+    g_key_file_remove_group(config->keyfile, group, NULL);
+
+    /* Save number of points */
+    g_key_file_set_integer(config->keyfile, group, "num_points", count);
+
+    /* Save each point */
+    for (int i = 0; i < count; i++) {
+        char *lux_key = g_strdup_printf("point_%d_lux", i);
+        char *brightness_key = g_strdup_printf("point_%d_brightness", i);
+
+        g_key_file_set_double(config->keyfile, group, lux_key, points[i].lux);
+        g_key_file_set_integer(config->keyfile, group, brightness_key, points[i].brightness);
+
+        g_free(lux_key);
+        g_free(brightness_key);
+    }
+
+    g_free(group);
     config->modified = TRUE;
 }
 
