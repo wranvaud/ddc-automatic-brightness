@@ -25,6 +25,7 @@ const char* monitor_get_display_name(Monitor *monitor);
 int monitor_get_brightness(Monitor *monitor);
 gboolean monitor_set_brightness(Monitor *monitor, int brightness);
 gboolean monitor_is_available(Monitor *monitor);
+void monitor_set_available(Monitor *monitor, gboolean available);
 
 /* Enhanced functions with auto-refresh capability */
 typedef gboolean (*MonitorRefreshCallback)(void);

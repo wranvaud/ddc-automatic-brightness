@@ -65,6 +65,7 @@ typedef struct {
     LaptopBacklight *laptop_backlight;
 
     gboolean updating_from_auto;
+    gboolean in_monitor_refresh;
     guint auto_brightness_timer;
     gboolean start_minimized;
 
@@ -296,17 +297,38 @@ static void on_window_destroy(GtkWidget *widget, gpointer data)
 /* Monitor selection changed */
 static void on_monitor_changed(GtkComboBox *combo, gpointer data)
 {
+    (void)data;
+
+    /* Skip if we're in the middle of a monitor refresh to avoid recursion */
+    if (app_data.in_monitor_refresh) {
+        g_message("Skipping on_monitor_changed during refresh");
+        return;
+    }
+
     gint active = gtk_combo_box_get_active(combo);
     if (active >= 0 && app_data.monitors) {
         app_data.current_monitor = monitor_list_get_monitor(app_data.monitors, active);
-        
+
         if (app_data.current_monitor) {
             /* Save as default monitor */
-            config_set_default_monitor(app_data.config, 
+            config_set_default_monitor(app_data.config,
                                      monitor_get_device_path(app_data.current_monitor));
-            
+
             /* Read current brightness */
             int brightness = monitor_get_brightness_with_retry(app_data.current_monitor, auto_refresh_monitors_on_failure);
+
+            /* If refresh was triggered, app_data.current_monitor has been updated to the new monitor.
+             * Retry reading brightness from the refreshed monitor. */
+            if (brightness < 0 && app_data.current_monitor) {
+                g_message("Retrying brightness read after auto-refresh...");
+                brightness = monitor_get_brightness(app_data.current_monitor);
+                if (brightness >= 0) {
+                    g_message("Brightness read successful on retry: %d%%", brightness);
+                } else {
+                    g_message("Brightness read still failed after retry");
+                }
+            }
+
             if (brightness >= 0) {
                 app_data.updating_from_auto = TRUE;
                 gtk_range_set_value(GTK_RANGE(app_data.brightness_scale), brightness);
@@ -1059,6 +1081,9 @@ static gboolean auto_refresh_monitors_on_failure(void)
 {
     g_message("DDC communication failed, auto-refreshing monitors...");
 
+    /* Set flag to prevent recursion during refresh */
+    app_data.in_monitor_refresh = TRUE;
+
     /* Save current state */
     gboolean had_monitors = app_data.monitors_found;
     const char *current_device_path = NULL;
@@ -1074,11 +1099,15 @@ static gboolean auto_refresh_monitors_on_failure(void)
         for (int i = 0; i < monitor_list_get_count(app_data.monitors); i++) {
             Monitor *monitor = monitor_list_get_monitor(app_data.monitors, i);
             if (strcmp(monitor_get_device_path(monitor), current_device_path) == 0) {
+                app_data.current_monitor = monitor_list_get_monitor(app_data.monitors, i);
                 gtk_combo_box_set_active(GTK_COMBO_BOX(app_data.monitor_combo), i);
                 break;
             }
         }
     }
+
+    /* Clear refresh flag */
+    app_data.in_monitor_refresh = FALSE;
 
     /* Check if we successfully found monitors after refresh */
     if (app_data.monitors_found) {
