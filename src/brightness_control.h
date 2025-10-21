@@ -18,9 +18,11 @@ typedef struct _MonitorList MonitorList;
 /* Monitor functions */
 Monitor* monitor_new(const char *device_path, const char *name);
 void monitor_free(Monitor *monitor);
+void monitor_set_internal(Monitor *monitor, gboolean is_internal);
 
 const char* monitor_get_device_path(Monitor *monitor);
 const char* monitor_get_display_name(Monitor *monitor);
+gboolean monitor_is_internal(Monitor *monitor);
 
 int monitor_get_brightness(Monitor *monitor);
 gboolean monitor_set_brightness(Monitor *monitor, int brightness);
@@ -39,6 +41,7 @@ void monitor_list_free(MonitorList *list);
 void monitor_list_add(MonitorList *list, Monitor *monitor);
 Monitor* monitor_list_get_monitor(MonitorList *list, int index);
 int monitor_list_get_count(MonitorList *list);
+void monitor_list_sort(MonitorList *list, GCompareFunc compare_func);
 
 G_END_DECLS
 

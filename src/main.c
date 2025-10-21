@@ -649,11 +649,13 @@ static gboolean auto_brightness_timer_callback(gpointer data)
                     app_data.updating_from_auto = TRUE;
                     gtk_range_set_value(GTK_RANGE(app_data.brightness_scale), target_brightness);
                     app_data.updating_from_auto = FALSE;
-                    update_brightness_display();
                 }
             }
         }
     }
+
+    /* Update tray icon to reflect current brightness and lux values after processing all monitors */
+    update_tray_icon_label();
 
     /* Timer continues running for auto brightness adjustments */
     return TRUE; /* Continue timer */
@@ -1353,16 +1355,22 @@ static void on_indicator_brightness_20(GtkMenuItem *item, gpointer data)
 {
     (void)item; (void)data;
     if (app_data.current_monitor) {
+        /* Disable auto brightness and save config immediately */
+        config_set_monitor_auto_brightness_mode(app_data.config,
+                                                monitor_get_device_path(app_data.current_monitor),
+                                                AUTO_BRIGHTNESS_MODE_DISABLED);
+
         monitor_set_brightness_with_retry(app_data.current_monitor, 20, auto_refresh_monitors_on_failure);
         app_data.updating_from_auto = TRUE;
         gtk_range_set_value(GTK_RANGE(app_data.brightness_scale), 20);
         app_data.updating_from_auto = FALSE;
-        update_brightness_display();
 
-        /* Disable auto brightness */
+        /* Update UI - this will now reflect the disabled mode in the menu */
         if (!gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(app_data.auto_brightness_disabled_radio))) {
             gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app_data.auto_brightness_disabled_radio), TRUE);
         }
+
+        update_brightness_display();
     }
 }
 
@@ -1370,16 +1378,22 @@ static void on_indicator_brightness_25(GtkMenuItem *item, gpointer data)
 {
     (void)item; (void)data;
     if (app_data.current_monitor) {
+        /* Disable auto brightness and save config immediately */
+        config_set_monitor_auto_brightness_mode(app_data.config,
+                                                monitor_get_device_path(app_data.current_monitor),
+                                                AUTO_BRIGHTNESS_MODE_DISABLED);
+
         monitor_set_brightness_with_retry(app_data.current_monitor, 25, auto_refresh_monitors_on_failure);
         app_data.updating_from_auto = TRUE;
         gtk_range_set_value(GTK_RANGE(app_data.brightness_scale), 25);
         app_data.updating_from_auto = FALSE;
-        update_brightness_display();
-        
-        /* Disable auto brightness */
+
+        /* Update UI - this will now reflect the disabled mode in the menu */
         if (!gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(app_data.auto_brightness_disabled_radio))) {
             gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app_data.auto_brightness_disabled_radio), TRUE);
         }
+
+        update_brightness_display();
     }
 }
 
@@ -1387,16 +1401,22 @@ static void on_indicator_brightness_50(GtkMenuItem *item, gpointer data)
 {
     (void)item; (void)data;
     if (app_data.current_monitor) {
+        /* Disable auto brightness and save config immediately */
+        config_set_monitor_auto_brightness_mode(app_data.config,
+                                                monitor_get_device_path(app_data.current_monitor),
+                                                AUTO_BRIGHTNESS_MODE_DISABLED);
+
         monitor_set_brightness_with_retry(app_data.current_monitor, 50, auto_refresh_monitors_on_failure);
         app_data.updating_from_auto = TRUE;
         gtk_range_set_value(GTK_RANGE(app_data.brightness_scale), 50);
         app_data.updating_from_auto = FALSE;
-        update_brightness_display();
-        
-        /* Disable auto brightness */
+
+        /* Update UI - this will now reflect the disabled mode in the menu */
         if (!gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(app_data.auto_brightness_disabled_radio))) {
             gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app_data.auto_brightness_disabled_radio), TRUE);
         }
+
+        update_brightness_display();
     }
 }
 
@@ -1404,16 +1424,22 @@ static void on_indicator_brightness_35(GtkMenuItem *item, gpointer data)
 {
     (void)item; (void)data;
     if (app_data.current_monitor) {
+        /* Disable auto brightness and save config immediately */
+        config_set_monitor_auto_brightness_mode(app_data.config,
+                                                monitor_get_device_path(app_data.current_monitor),
+                                                AUTO_BRIGHTNESS_MODE_DISABLED);
+
         monitor_set_brightness_with_retry(app_data.current_monitor, 35, auto_refresh_monitors_on_failure);
         app_data.updating_from_auto = TRUE;
         gtk_range_set_value(GTK_RANGE(app_data.brightness_scale), 35);
         app_data.updating_from_auto = FALSE;
-        update_brightness_display();
-        
-        /* Disable auto brightness */
+
+        /* Update UI - this will now reflect the disabled mode in the menu */
         if (!gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(app_data.auto_brightness_disabled_radio))) {
             gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app_data.auto_brightness_disabled_radio), TRUE);
         }
+
+        update_brightness_display();
     }
 }
 
@@ -1421,16 +1447,22 @@ static void on_indicator_brightness_70(GtkMenuItem *item, gpointer data)
 {
     (void)item; (void)data;
     if (app_data.current_monitor) {
+        /* Disable auto brightness and save config immediately */
+        config_set_monitor_auto_brightness_mode(app_data.config,
+                                                monitor_get_device_path(app_data.current_monitor),
+                                                AUTO_BRIGHTNESS_MODE_DISABLED);
+
         monitor_set_brightness_with_retry(app_data.current_monitor, 70, auto_refresh_monitors_on_failure);
         app_data.updating_from_auto = TRUE;
         gtk_range_set_value(GTK_RANGE(app_data.brightness_scale), 70);
         app_data.updating_from_auto = FALSE;
-        update_brightness_display();
-        
-        /* Disable auto brightness */
+
+        /* Update UI - this will now reflect the disabled mode in the menu */
         if (!gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(app_data.auto_brightness_disabled_radio))) {
             gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app_data.auto_brightness_disabled_radio), TRUE);
         }
+
+        update_brightness_display();
     }
 }
 
@@ -1438,16 +1470,22 @@ static void on_indicator_brightness_100(GtkMenuItem *item, gpointer data)
 {
     (void)item; (void)data;
     if (app_data.current_monitor) {
+        /* Disable auto brightness and save config immediately */
+        config_set_monitor_auto_brightness_mode(app_data.config,
+                                                monitor_get_device_path(app_data.current_monitor),
+                                                AUTO_BRIGHTNESS_MODE_DISABLED);
+
         monitor_set_brightness_with_retry(app_data.current_monitor, 100, auto_refresh_monitors_on_failure);
         app_data.updating_from_auto = TRUE;
         gtk_range_set_value(GTK_RANGE(app_data.brightness_scale), 100);
         app_data.updating_from_auto = FALSE;
-        update_brightness_display();
-        
-        /* Disable auto brightness */
+
+        /* Update UI - this will now reflect the disabled mode in the menu */
         if (!gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(app_data.auto_brightness_disabled_radio))) {
             gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app_data.auto_brightness_disabled_radio), TRUE);
         }
+
+        update_brightness_display();
     }
 }
 

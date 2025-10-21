@@ -15,6 +15,7 @@ struct _Monitor {
     char *device_path;
     char *display_name;
     gboolean available;
+    gboolean is_internal;
 };
 
 /* Monitor list structure */
@@ -29,7 +30,8 @@ Monitor* monitor_new(const char *device_path, const char *name)
     monitor->device_path = g_strdup(device_path);
     monitor->display_name = g_strdup(name ? name : device_path);
     monitor->available = TRUE;
-    
+    monitor->is_internal = FALSE;  /* Will be set during detection */
+
     return monitor;
 }
 
@@ -53,6 +55,20 @@ const char* monitor_get_device_path(Monitor *monitor)
 const char* monitor_get_display_name(Monitor *monitor)
 {
     return monitor ? monitor->display_name : NULL;
+}
+
+/* Check if monitor is internal display */
+gboolean monitor_is_internal(Monitor *monitor)
+{
+    return monitor ? monitor->is_internal : FALSE;
+}
+
+/* Set monitor internal display flag */
+void monitor_set_internal(Monitor *monitor, gboolean is_internal)
+{
+    if (monitor) {
+        monitor->is_internal = is_internal;
+    }
 }
 
 /* Get current brightness from monitor */
@@ -246,4 +262,12 @@ Monitor* monitor_list_get_monitor(MonitorList *list, int index)
 int monitor_list_get_count(MonitorList *list)
 {
     return list ? g_list_length(list->monitors) : 0;
+}
+
+/* Sort monitor list using provided comparison function */
+void monitor_list_sort(MonitorList *list, GCompareFunc compare_func)
+{
+    if (list && compare_func) {
+        list->monitors = g_list_sort(list->monitors, compare_func);
+    }
 }
