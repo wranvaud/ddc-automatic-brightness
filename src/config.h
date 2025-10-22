@@ -57,6 +57,10 @@ gboolean config_load_light_sensor_curve(AppConfig *config, const char *device_pa
 void config_save_light_sensor_curve(AppConfig *config, const char *device_path,
                                    const LightSensorCurvePoint *points, int count);
 
+/* Light sensor hysteresis setting - per monitor */
+double config_get_light_sensor_hysteresis(AppConfig *config, const char *device_path);
+void config_set_light_sensor_hysteresis(AppConfig *config, const char *device_path, double hysteresis);
+
 /* Schedule settings */
 GKeyFile* config_get_keyfile(AppConfig *config);
 

@@ -671,14 +671,15 @@ static gboolean auto_brightness_timer_callback(gpointer data)
                         /* Get the last stable lux value used for this monitor */
                         double stable_lux = monitor_get_stable_lux(monitor);
 
-                        /* Hysteresis: only change brightness if lux changes by more than ±5 lux */
-                        const double LUX_HYSTERESIS = 5.0;
+                        /* Get configured hysteresis for this monitor (default: 5.0 lux) */
+                        double lux_hysteresis = config_get_light_sensor_hysteresis(app_data.config,
+                                                                                   monitor_get_device_path(monitor));
                         gboolean should_update = FALSE;
 
                         if (stable_lux < 0) {
                             /* First time setting brightness for this monitor */
                             should_update = TRUE;
-                        } else if (lux < stable_lux - LUX_HYSTERESIS || lux > stable_lux + LUX_HYSTERESIS) {
+                        } else if (lux < stable_lux - lux_hysteresis || lux > stable_lux + lux_hysteresis) {
                             /* Lux changed significantly, update brightness */
                             should_update = TRUE;
                         }
@@ -695,7 +696,7 @@ static gboolean auto_brightness_timer_callback(gpointer data)
                             /* Within hysteresis zone, keep current brightness target */
                             if (monitor == app_data.current_monitor) {
                                 g_debug("Light sensor: %.1f lux within hysteresis zone of %.1f lux (±%.1f), no change",
-                                       lux, stable_lux, LUX_HYSTERESIS);
+                                       lux, stable_lux, lux_hysteresis);
                             }
                             target_brightness = -1;  /* Don't update */
                         }

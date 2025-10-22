@@ -21,6 +21,7 @@ typedef struct {
     GtkWidget *curve_list;
     GtkWidget *lux_spin;
     GtkWidget *brightness_spin;
+    GtkWidget *hysteresis_spin;
     GtkWidget *graph_drawing_area;
 
     AppConfig *config;
@@ -200,6 +201,37 @@ void show_light_sensor_dialog(GtkWidget *parent, AppConfig *config, const char *
     GtkWidget *add_button = gtk_button_new_with_label("Add");
     gtk_box_pack_start(GTK_BOX(add_button_hbox), add_button, FALSE, FALSE, 0);
     g_signal_connect(add_button, "clicked", G_CALLBACK(on_add_clicked), data);
+
+    /* Sensitivity/Hysteresis frame */
+    GtkWidget *hysteresis_frame = gtk_frame_new("Luminosity Sensitivity");
+    gtk_box_pack_start(GTK_BOX(vbox), hysteresis_frame, FALSE, FALSE, 0);
+
+    GtkWidget *hysteresis_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
+    gtk_container_set_border_width(GTK_CONTAINER(hysteresis_vbox), 10);
+    gtk_container_add(GTK_CONTAINER(hysteresis_frame), hysteresis_vbox);
+
+    /* Explanation label */
+    GtkWidget *hysteresis_label = gtk_label_new(
+        "Adjust how much ambient light must change before brightness adjusts.\n"
+        "Higher values = less sensitive to small light changes (reduces flickering).");
+    gtk_label_set_line_wrap(GTK_LABEL(hysteresis_label), TRUE);
+    gtk_label_set_xalign(GTK_LABEL(hysteresis_label), 0);
+    gtk_box_pack_start(GTK_BOX(hysteresis_vbox), hysteresis_label, FALSE, FALSE, 5);
+
+    /* Hysteresis input line */
+    GtkWidget *hysteresis_hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
+    gtk_box_pack_start(GTK_BOX(hysteresis_vbox), hysteresis_hbox, FALSE, FALSE, 0);
+
+    gtk_box_pack_start(GTK_BOX(hysteresis_hbox), gtk_label_new("Change threshold:"), FALSE, FALSE, 0);
+
+    data->hysteresis_spin = gtk_spin_button_new_with_range(0, 100, 0.5);
+    gtk_spin_button_set_digits(GTK_SPIN_BUTTON(data->hysteresis_spin), 1);
+    /* Load current hysteresis value from config */
+    double current_hysteresis = config_get_light_sensor_hysteresis(config, device_path);
+    gtk_spin_button_set_value(GTK_SPIN_BUTTON(data->hysteresis_spin), current_hysteresis);
+    gtk_box_pack_start(GTK_BOX(hysteresis_hbox), data->hysteresis_spin, FALSE, FALSE, 0);
+
+    gtk_box_pack_start(GTK_BOX(hysteresis_hbox), gtk_label_new("lux"), FALSE, FALSE, 0);
 
     /* Dialog buttons */
     GtkWidget *save_button = gtk_button_new_with_label("Save");
@@ -435,6 +467,11 @@ static void on_save_clicked(GtkButton *button, LightSensorDialogData *data)
 
     /* Save curve to configuration */
     config_save_light_sensor_curve(data->config, data->device_path, data->points, data->point_count);
+
+    /* Save hysteresis setting */
+    double hysteresis = gtk_spin_button_get_value(GTK_SPIN_BUTTON(data->hysteresis_spin));
+    config_set_light_sensor_hysteresis(data->config, data->device_path, hysteresis);
+
     config_save(data->config);
 
     /* Close dialog */

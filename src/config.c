@@ -546,6 +546,53 @@ void config_save_light_sensor_curve(AppConfig *config, const char *device_path,
     config->modified = TRUE;
 }
 
+/* Get light sensor hysteresis for a monitor (default: 5.0 lux) */
+double config_get_light_sensor_hysteresis(AppConfig *config, const char *device_path)
+{
+    if (!config || !device_path) {
+        return 5.0;  /* Default hysteresis */
+    }
+
+    /* Build group name for this monitor's light sensor settings */
+    char *group = g_strdup_printf("LightSensorCurve_%s", device_path);
+
+    GError *error = NULL;
+    double hysteresis = g_key_file_get_double(config->keyfile, group, "hysteresis", &error);
+
+    if (error) {
+        /* Not set, use default */
+        g_error_free(error);
+        hysteresis = 5.0;
+    }
+
+    /* Clamp to valid range (0-100 lux) */
+    if (hysteresis < 0.0) hysteresis = 0.0;
+    if (hysteresis > 100.0) hysteresis = 100.0;
+
+    g_free(group);
+    return hysteresis;
+}
+
+/* Set light sensor hysteresis for a monitor */
+void config_set_light_sensor_hysteresis(AppConfig *config, const char *device_path, double hysteresis)
+{
+    if (!config || !device_path) {
+        return;
+    }
+
+    /* Clamp to valid range (0-100 lux) */
+    if (hysteresis < 0.0) hysteresis = 0.0;
+    if (hysteresis > 100.0) hysteresis = 100.0;
+
+    /* Build group name for this monitor's light sensor settings */
+    char *group = g_strdup_printf("LightSensorCurve_%s", device_path);
+
+    g_key_file_set_double(config->keyfile, group, "hysteresis", hysteresis);
+
+    g_free(group);
+    config->modified = TRUE;
+}
+
 /* Get keyfile for direct access (for schedule configuration) */
 GKeyFile* config_get_keyfile(AppConfig *config)
 {
