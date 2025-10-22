@@ -245,7 +245,8 @@ static int interpolate(double x, double x1, double x2, int y1, int y2)
     if (x >= x2) return y2;
 
     double ratio = (x - x1) / (x2 - x1);
-    return (int)(y1 + ratio * (y2 - y1));
+    /* Round to nearest integer instead of truncating */
+    return (int)(y1 + ratio * (y2 - y1) + 0.5);
 }
 
 /* Calculate brightness percentage from lux value using calibration curve */

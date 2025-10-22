@@ -16,6 +16,9 @@ struct _Monitor {
     char *display_name;
     gboolean available;
     gboolean is_internal;
+    int current_brightness;  /* Last brightness value actually sent to monitor (-1 = unknown) */
+    int target_brightness;   /* Target brightness for gradual transitions (-1 = no transition) */
+    double stable_lux;       /* Last lux value used to set brightness (for hysteresis, -1.0 = unknown) */
 };
 
 /* Monitor list structure */
@@ -31,6 +34,9 @@ Monitor* monitor_new(const char *device_path, const char *name)
     monitor->display_name = g_strdup(name ? name : device_path);
     monitor->available = TRUE;
     monitor->is_internal = FALSE;  /* Will be set during detection */
+    monitor->current_brightness = -1;  /* Unknown initial brightness */
+    monitor->target_brightness = -1;   /* No transition pending */
+    monitor->stable_lux = -1.0;        /* Unknown initial lux */
 
     return monitor;
 }
@@ -132,25 +138,36 @@ gboolean monitor_set_brightness(Monitor *monitor, int brightness)
     if (!monitor || !monitor->available) {
         return FALSE;
     }
-    
+
     if (brightness < 0 || brightness > 100) {
         g_warning("Invalid brightness value: %d", brightness);
         return FALSE;
     }
-    
+
+    /* Skip redundant commands - don't send if brightness unchanged */
+    if (monitor->current_brightness == brightness) {
+        g_debug("Brightness unchanged at %d%% for %s, skipping DDC-CI command",
+                brightness, monitor->device_path);
+        return TRUE;  /* Not an error, just unnecessary */
+    }
+
     /* Execute ddccontrol command to set brightness */
     char command[256];
-    snprintf(command, sizeof(command), "ddccontrol -r 0x10 -w %d dev:%s >/dev/null 2>&1", 
+    snprintf(command, sizeof(command), "ddccontrol -r 0x10 -w %d dev:%s >/dev/null 2>&1",
              brightness, monitor->device_path);
-    
+
     int result = system(command);
-    
+
     if (result != 0) {
         g_warning("Failed to set brightness on monitor %s", monitor->device_path);
         monitor->available = FALSE;
         return FALSE;
     }
-    
+
+    /* Update current brightness tracking on success */
+    monitor->current_brightness = brightness;
+    g_debug("Successfully set brightness to %d%% for %s", brightness, monitor->device_path);
+
     return TRUE;
 }
 
@@ -165,6 +182,40 @@ void monitor_set_available(Monitor *monitor, gboolean available)
 {
     if (monitor) {
         monitor->available = available;
+    }
+}
+
+/* Get current brightness (last value actually sent to monitor) */
+int monitor_get_current_brightness(Monitor *monitor)
+{
+    return monitor ? monitor->current_brightness : -1;
+}
+
+/* Get target brightness (for gradual transitions) */
+int monitor_get_target_brightness(Monitor *monitor)
+{
+    return monitor ? monitor->target_brightness : -1;
+}
+
+/* Set target brightness (for gradual transitions) */
+void monitor_set_target_brightness(Monitor *monitor, int brightness)
+{
+    if (monitor) {
+        monitor->target_brightness = brightness;
+    }
+}
+
+/* Get stable lux value (last lux used to set brightness) */
+double monitor_get_stable_lux(Monitor *monitor)
+{
+    return monitor ? monitor->stable_lux : -1.0;
+}
+
+/* Set stable lux value (for hysteresis) */
+void monitor_set_stable_lux(Monitor *monitor, double lux)
+{
+    if (monitor) {
+        monitor->stable_lux = lux;
     }
 }
 

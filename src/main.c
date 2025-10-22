@@ -67,6 +67,7 @@ typedef struct {
     gboolean updating_from_auto;
     gboolean in_monitor_refresh;
     guint auto_brightness_timer;
+    guint brightness_transition_timer;
     gboolean start_minimized;
 
     /* Laptop backlight inotify monitoring */
@@ -111,6 +112,7 @@ static void on_start_minimized_toggled(GtkToggleButton *button, gpointer data);
 static void on_show_brightness_tray_toggled(GtkToggleButton *button, gpointer data);
 static void on_show_light_level_tray_toggled(GtkToggleButton *button, gpointer data);
 static gboolean auto_brightness_timer_callback(gpointer data);
+static gboolean brightness_transition_timer_callback(gpointer data);
 static gboolean setup_laptop_backlight_monitoring(void);
 static void cleanup_laptop_backlight_monitoring(void);
 static gboolean on_laptop_backlight_change(GIOChannel *channel, GIOCondition condition, gpointer data);
@@ -232,10 +234,15 @@ int main(int argc, char *argv[])
 #endif
     
     /* Start timer for menu updates and auto brightness (runs always) */
-    app_data.auto_brightness_timer = g_timeout_add_seconds(60, 
-                                                          auto_brightness_timer_callback, 
+    app_data.auto_brightness_timer = g_timeout_add_seconds(60,
+                                                          auto_brightness_timer_callback,
                                                           &app_data);
-    
+
+    /* Start timer for gradual brightness transitions (runs every 0.5 seconds for smooth 1% steps) */
+    app_data.brightness_transition_timer = g_timeout_add(500,  /* 500 milliseconds = 0.5 seconds */
+                                                         brightness_transition_timer_callback,
+                                                         &app_data);
+
     /* Show main window unless starting minimized */
     if (!start_minimized || !HAVE_APPINDICATOR) {
         gtk_widget_show_all(app_data.main_window);
@@ -251,7 +258,11 @@ int main(int argc, char *argv[])
     if (app_data.auto_brightness_timer > 0) {
         g_source_remove(app_data.auto_brightness_timer);
     }
-    
+
+    if (app_data.brightness_transition_timer > 0) {
+        g_source_remove(app_data.brightness_transition_timer);
+    }
+
     if (app_data.monitor_retry_timer > 0) {
         g_source_remove(app_data.monitor_retry_timer);
     }
@@ -484,19 +495,16 @@ static void on_auto_brightness_mode_changed(GtkToggleButton *button, gpointer da
                                             monitor_get_device_path(app_data.current_monitor),
                                             mode);
 
-    /* Apply brightness immediately based on the new mode */
+    /* Apply brightness via gradual transition based on the new mode */
     if (mode == AUTO_BRIGHTNESS_MODE_TIME_SCHEDULE) {
-        /* Apply current scheduled brightness immediately */
+        /* Apply current scheduled brightness via gradual transition */
         int target_brightness = scheduler_get_current_brightness(app_data.scheduler);
         if (target_brightness >= 0) {
-            monitor_set_brightness_with_retry(app_data.current_monitor, target_brightness, auto_refresh_monitors_on_failure);
-            app_data.updating_from_auto = TRUE;
-            gtk_range_set_value(GTK_RANGE(app_data.brightness_scale), target_brightness);
-            app_data.updating_from_auto = FALSE;
-            update_brightness_display();
+            monitor_set_target_brightness(app_data.current_monitor, target_brightness);
+            g_message("Scheduled brightness: setting target to %d%%", target_brightness);
         }
     } else if (mode == AUTO_BRIGHTNESS_MODE_LIGHT_SENSOR) {
-        /* Apply light sensor-based brightness immediately */
+        /* Apply light sensor-based brightness via gradual transition */
         if (light_sensor_is_available(app_data.light_sensor)) {
             /* Load the curve for this monitor */
             load_light_sensor_curve_for_monitor(monitor_get_device_path(app_data.current_monitor));
@@ -505,17 +513,16 @@ static void on_auto_brightness_mode_changed(GtkToggleButton *button, gpointer da
             if (lux >= 0) {
                 int target_brightness = light_sensor_calculate_brightness(app_data.light_sensor, lux);
                 if (target_brightness >= 0) {
-                    monitor_set_brightness_with_retry(app_data.current_monitor, target_brightness, auto_refresh_monitors_on_failure);
-                    app_data.updating_from_auto = TRUE;
-                    gtk_range_set_value(GTK_RANGE(app_data.brightness_scale), target_brightness);
-                    app_data.updating_from_auto = FALSE;
-                    update_brightness_display();
-                    g_message("Light sensor: %.1f lux -> %d%% brightness", lux, target_brightness);
+                    /* Set stable lux when mode is first enabled */
+                    monitor_set_stable_lux(app_data.current_monitor, lux);
+                    monitor_set_target_brightness(app_data.current_monitor, target_brightness);
+                    g_message("Light sensor: %.1f lux -> %d%% brightness (mode enabled, gradual transition)",
+                             lux, target_brightness);
                 }
             }
         }
     } else if (mode == AUTO_BRIGHTNESS_MODE_LAPTOP_DISPLAY) {
-        /* Apply laptop display-based brightness immediately */
+        /* Apply laptop display-based brightness via gradual transition */
         if (laptop_backlight_is_available(app_data.laptop_backlight)) {
             int laptop_brightness = laptop_backlight_read_brightness(app_data.laptop_backlight);
             if (laptop_brightness >= 0) {
@@ -528,12 +535,8 @@ static void on_auto_brightness_mode_changed(GtkToggleButton *button, gpointer da
                 if (target_brightness < 0) target_brightness = 0;
                 if (target_brightness > 100) target_brightness = 100;
 
-                monitor_set_brightness_with_retry(app_data.current_monitor, target_brightness, auto_refresh_monitors_on_failure);
-                app_data.updating_from_auto = TRUE;
-                gtk_range_set_value(GTK_RANGE(app_data.brightness_scale), target_brightness);
-                app_data.updating_from_auto = FALSE;
-                update_brightness_display();
-                g_message("Laptop display: %d%% + offset %d%% -> %d%% brightness",
+                monitor_set_target_brightness(app_data.current_monitor, target_brightness);
+                g_message("Laptop display: %d%% + offset %d%% -> %d%% brightness (gradual transition)",
                          laptop_brightness, offset, target_brightness);
             }
         }
@@ -582,6 +585,62 @@ static void on_refresh_monitors_clicked(GtkButton *button, gpointer data)
     app_data.monitor_retry_attempt = 0;   /* Reset after manual refresh */
 }
 
+/* Brightness transition timer callback - handles gradual brightness changes */
+static gboolean brightness_transition_timer_callback(gpointer data)
+{
+    (void)data;  /* Unused parameter */
+
+    /* Process each monitor's transition */
+    if (app_data.monitors) {
+        for (int i = 0; i < monitor_list_get_count(app_data.monitors); i++) {
+            Monitor *monitor = monitor_list_get_monitor(app_data.monitors, i);
+            int current = monitor_get_current_brightness(monitor);
+            int target = monitor_get_target_brightness(monitor);
+
+            /* Skip if no transition needed */
+            if (target < 0 || current == target) {
+                continue;
+            }
+
+            /* Move one step toward target */
+            int next_brightness;
+            if (current < 0) {
+                /* Unknown current brightness, jump directly to target */
+                next_brightness = target;
+            } else if (current < target) {
+                /* Increase by 1% */
+                next_brightness = current + 1;
+            } else {
+                /* Decrease by 1% */
+                next_brightness = current - 1;
+            }
+
+            /* Set the brightness */
+            monitor_set_brightness_with_retry(monitor, next_brightness, auto_refresh_monitors_on_failure);
+
+            /* Update UI if this is the current monitor */
+            if (monitor == app_data.current_monitor) {
+                app_data.updating_from_auto = TRUE;
+                gtk_range_set_value(GTK_RANGE(app_data.brightness_scale), next_brightness);
+                app_data.updating_from_auto = FALSE;
+                /* Update the label below the slider to reflect current brightness */
+                update_brightness_display();
+            }
+
+            /* If we've reached the target, clear it */
+            if (next_brightness == target) {
+                monitor_set_target_brightness(monitor, -1);
+            }
+        }
+    }
+
+    /* Note: Tray icon and menu are already updated by update_brightness_display()
+     * when processing the current monitor above */
+
+    /* Continue timer */
+    return TRUE;
+}
+
 /* Auto brightness timer callback */
 static gboolean auto_brightness_timer_callback(gpointer data)
 {
@@ -602,17 +661,43 @@ static gboolean auto_brightness_timer_callback(gpointer data)
                 /* Apply scheduled brightness to this monitor */
                 target_brightness = scheduler_get_current_brightness(app_data.scheduler);
             } else if (mode == AUTO_BRIGHTNESS_MODE_LIGHT_SENSOR) {
-                /* Apply light sensor-based brightness */
+                /* Apply light sensor-based brightness with hysteresis */
                 if (light_sensor_is_available(app_data.light_sensor)) {
                     /* Load the curve for this monitor */
                     load_light_sensor_curve_for_monitor(monitor_get_device_path(monitor));
 
                     double lux = light_sensor_read_lux(app_data.light_sensor);
                     if (lux >= 0) {
-                        target_brightness = light_sensor_calculate_brightness(app_data.light_sensor, lux);
+                        /* Get the last stable lux value used for this monitor */
+                        double stable_lux = monitor_get_stable_lux(monitor);
 
-                        if (monitor == app_data.current_monitor) {
-                            g_message("Light sensor: %.1f lux -> %d%% brightness", lux, target_brightness);
+                        /* Hysteresis: only change brightness if lux changes by more than ±5 lux */
+                        const double LUX_HYSTERESIS = 5.0;
+                        gboolean should_update = FALSE;
+
+                        if (stable_lux < 0) {
+                            /* First time setting brightness for this monitor */
+                            should_update = TRUE;
+                        } else if (lux < stable_lux - LUX_HYSTERESIS || lux > stable_lux + LUX_HYSTERESIS) {
+                            /* Lux changed significantly, update brightness */
+                            should_update = TRUE;
+                        }
+
+                        if (should_update) {
+                            target_brightness = light_sensor_calculate_brightness(app_data.light_sensor, lux);
+                            monitor_set_stable_lux(monitor, lux);
+
+                            if (monitor == app_data.current_monitor) {
+                                g_message("Light sensor: %.1f lux -> %d%% brightness (was %.1f lux)",
+                                         lux, target_brightness, stable_lux);
+                            }
+                        } else {
+                            /* Within hysteresis zone, keep current brightness target */
+                            if (monitor == app_data.current_monitor) {
+                                g_debug("Light sensor: %.1f lux within hysteresis zone of %.1f lux (±%.1f), no change",
+                                       lux, stable_lux, LUX_HYSTERESIS);
+                            }
+                            target_brightness = -1;  /* Don't update */
                         }
                     }
                 }
@@ -640,15 +725,13 @@ static gboolean auto_brightness_timer_callback(gpointer data)
                 }
             }
 
-            /* Apply the calculated brightness */
+            /* Set target brightness for gradual transition */
             if (target_brightness >= 0) {
-                monitor_set_brightness_with_retry(monitor, target_brightness, auto_refresh_monitors_on_failure);
+                monitor_set_target_brightness(monitor, target_brightness);
 
-                /* Update UI if this is the current monitor */
                 if (monitor == app_data.current_monitor) {
-                    app_data.updating_from_auto = TRUE;
-                    gtk_range_set_value(GTK_RANGE(app_data.brightness_scale), target_brightness);
-                    app_data.updating_from_auto = FALSE;
+                    g_debug("Set target brightness to %d%% (current: %d%%) for gradual transition",
+                           target_brightness, monitor_get_current_brightness(monitor));
                 }
             }
         }
@@ -1542,24 +1625,17 @@ static void update_tray_icon_label(void)
     gboolean show_brightness = config_get_show_brightness_in_tray(app_data.config);
     gboolean show_light_level = config_get_show_light_level_in_tray(app_data.config);
 
-    /* Get current brightness - if in light sensor mode, calculate it fresh to match menu */
-    int brightness = (int)gtk_range_get_value(GTK_RANGE(app_data.brightness_scale));
-    AutoBrightnessMode mode = AUTO_BRIGHTNESS_MODE_DISABLED;
-    if (app_data.current_monitor) {
-        mode = config_get_monitor_auto_brightness_mode(app_data.config,
-                                                       monitor_get_device_path(app_data.current_monitor));
+    /* Get actual current brightness from monitor (what was last sent to hardware) */
+    int brightness = monitor_get_current_brightness(app_data.current_monitor);
+    if (brightness < 0) {
+        /* If current brightness unknown, fall back to slider value */
+        brightness = (int)gtk_range_get_value(GTK_RANGE(app_data.brightness_scale));
     }
 
     /* Build label based on what's enabled */
     if (show_brightness && show_light_level && light_sensor_is_available(app_data.light_sensor)) {
         /* Show both brightness and light level */
         double lux = light_sensor_read_lux(app_data.light_sensor);
-
-        /* If in light sensor mode, calculate brightness fresh to match the menu */
-        if (mode == AUTO_BRIGHTNESS_MODE_LIGHT_SENSOR && lux >= 0 && app_data.current_monitor) {
-            load_light_sensor_curve_for_monitor(monitor_get_device_path(app_data.current_monitor));
-            brightness = light_sensor_calculate_brightness(app_data.light_sensor, lux);
-        }
 
         if (lux >= 0) {
             char label[48];
@@ -1607,16 +1683,7 @@ static void update_tray_icon_label(void)
             app_indicator_set_label(app_data.indicator, "", "");
         }
     } else if (show_brightness && app_data.current_monitor) {
-        /* Show only brightness percentage */
-        /* If in light sensor mode, calculate brightness fresh to match the menu */
-        if (mode == AUTO_BRIGHTNESS_MODE_LIGHT_SENSOR && light_sensor_is_available(app_data.light_sensor)) {
-            load_light_sensor_curve_for_monitor(monitor_get_device_path(app_data.current_monitor));
-            double lux = light_sensor_read_lux(app_data.light_sensor);
-            if (lux >= 0) {
-                brightness = light_sensor_calculate_brightness(app_data.light_sensor, lux);
-            }
-        }
-
+        /* Show only brightness percentage (actual current brightness) */
         char label[16];
         snprintf(label, sizeof(label), "%d%%", brightness);
         app_indicator_set_label(app_data.indicator, label, "100%");

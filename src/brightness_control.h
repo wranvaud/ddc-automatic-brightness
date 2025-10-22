@@ -29,6 +29,15 @@ gboolean monitor_set_brightness(Monitor *monitor, int brightness);
 gboolean monitor_is_available(Monitor *monitor);
 void monitor_set_available(Monitor *monitor, gboolean available);
 
+/* Brightness tracking for gradual transitions */
+int monitor_get_current_brightness(Monitor *monitor);
+int monitor_get_target_brightness(Monitor *monitor);
+void monitor_set_target_brightness(Monitor *monitor, int brightness);
+
+/* Lux tracking for hysteresis */
+double monitor_get_stable_lux(Monitor *monitor);
+void monitor_set_stable_lux(Monitor *monitor, double lux);
+
 /* Enhanced functions with auto-refresh capability */
 typedef gboolean (*MonitorRefreshCallback)(void);
 int monitor_get_brightness_with_retry(Monitor *monitor, MonitorRefreshCallback refresh_callback);
