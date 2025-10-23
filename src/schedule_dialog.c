@@ -12,10 +12,11 @@ typedef struct {
     GtkWidget *hour_spin;
     GtkWidget *minute_spin;
     GtkWidget *brightness_spin;
-    
+    GtkWidget *graph_drawing_area;
+
     BrightnessScheduler *scheduler;
     AppConfig *config;
-    
+
     GtkListStore *list_store;
 } ScheduleDialogData;
 
@@ -36,6 +37,8 @@ static void on_save_clicked(GtkButton *button, ScheduleDialogData *data);
 static void on_cancel_clicked(GtkButton *button, ScheduleDialogData *data);
 static void on_time_edited(GtkCellRendererText *renderer, gchar *path, gchar *new_text, ScheduleDialogData *data);
 static void on_brightness_edited(GtkCellRendererText *renderer, gchar *path, gchar *new_text, ScheduleDialogData *data);
+static gboolean on_graph_draw(GtkWidget *widget, cairo_t *cr, ScheduleDialogData *data);
+static void redraw_graph(ScheduleDialogData *data);
 
 /* Show schedule configuration dialog */
 void show_schedule_dialog(GtkWidget *parent, BrightnessScheduler *scheduler, AppConfig *config)
@@ -50,7 +53,7 @@ void show_schedule_dialog(GtkWidget *parent, BrightnessScheduler *scheduler, App
                                               GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT,
                                               (const gchar*)NULL);
     
-    gtk_window_set_default_size(GTK_WINDOW(data->dialog), 240, 350);
+    gtk_window_set_default_size(GTK_WINDOW(data->dialog), 600, 550);
     gtk_window_set_resizable(GTK_WINDOW(data->dialog), TRUE);
     
     /* Get dialog content area */
@@ -60,7 +63,17 @@ void show_schedule_dialog(GtkWidget *parent, BrightnessScheduler *scheduler, App
     /* Main container */
     GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
     gtk_container_add(GTK_CONTAINER(content_area), vbox);
-    
+
+    /* Graph frame - fixed height */
+    GtkWidget *graph_frame = gtk_frame_new("Brightness Through the Day");
+    gtk_box_pack_start(GTK_BOX(vbox), graph_frame, FALSE, FALSE, 0);
+
+    /* Drawing area for schedule graph */
+    data->graph_drawing_area = gtk_drawing_area_new();
+    gtk_widget_set_size_request(data->graph_drawing_area, -1, 200);
+    g_signal_connect(data->graph_drawing_area, "draw", G_CALLBACK(on_graph_draw), data);
+    gtk_container_add(GTK_CONTAINER(graph_frame), data->graph_drawing_area);
+
     /* Schedule list frame - expandable */
     GtkWidget *list_frame = gtk_frame_new("Schedule Times");
     gtk_widget_set_vexpand(list_frame, TRUE);
@@ -247,9 +260,10 @@ static void on_add_clicked(GtkButton *button, ScheduleDialogData *data)
     
     /* Add to scheduler */
     scheduler_add_time(data->scheduler, hour, minute, brightness);
-    
-    /* Refresh list */
+
+    /* Refresh list and graph */
     refresh_schedule_list(data);
+    redraw_graph(data);
 }
 
 /* Remove button clicked */
@@ -268,9 +282,10 @@ static void on_remove_clicked(GtkButton *button, ScheduleDialogData *data)
         
         /* Remove from scheduler */
         scheduler_remove_time(data->scheduler, hour, minute);
-        
-        /* Refresh list */
+
+        /* Refresh list and graph */
         refresh_schedule_list(data);
+        redraw_graph(data);
     } else {
         GtkWidget *dialog = gtk_message_dialog_new(GTK_WINDOW(data->dialog),
                                                   GTK_DIALOG_MODAL,
@@ -424,8 +439,9 @@ static void on_time_edited(GtkCellRendererText *renderer, gchar *path, gchar *ne
                           COL_MINUTE, new_minute,
                           -1);
         
-        /* Refresh the entire list to maintain sort order */
+        /* Refresh the entire list to maintain sort order and update graph */
         refresh_schedule_list(data);
+        redraw_graph(data);
     }
     
     gtk_tree_path_free(tree_path);
@@ -469,7 +485,171 @@ static void on_brightness_edited(GtkCellRendererText *renderer, gchar *path, gch
         gtk_list_store_set(data->list_store, &iter,
                           COL_BRIGHTNESS, new_brightness,
                           -1);
+        redraw_graph(data);
     }
-    
+
     gtk_tree_path_free(tree_path);
+}
+
+/* Redraw the graph */
+static void redraw_graph(ScheduleDialogData *data)
+{
+    if (data->graph_drawing_area) {
+        gtk_widget_queue_draw(data->graph_drawing_area);
+    }
+}
+
+/* Draw the schedule graph */
+static gboolean on_graph_draw(GtkWidget *widget, cairo_t *cr, ScheduleDialogData *data)
+{
+    (void)widget;
+
+    GtkAllocation allocation;
+    gtk_widget_get_allocation(data->graph_drawing_area, &allocation);
+
+    int width = allocation.width;
+    int height = allocation.height;
+
+    /* Margins */
+    double margin_left = 50;
+    double margin_right = 20;
+    double margin_top = 20;
+    double margin_bottom = 40;
+
+    double graph_width = width - margin_left - margin_right;
+    double graph_height = height - margin_top - margin_bottom;
+
+    /* Background */
+    cairo_set_source_rgb(cr, 1.0, 1.0, 1.0);
+    cairo_paint(cr);
+
+    /* Draw grid */
+    cairo_set_source_rgb(cr, 0.9, 0.9, 0.9);
+    cairo_set_line_width(cr, 1.0);
+
+    /* Horizontal grid lines (brightness levels) */
+    for (int i = 0; i <= 10; i++) {
+        double y = margin_top + (graph_height * i / 10.0);
+        cairo_move_to(cr, margin_left, y);
+        cairo_line_to(cr, margin_left + graph_width, y);
+    }
+
+    /* Vertical grid lines (hours) */
+    for (int i = 0; i <= 24; i++) {
+        double x = margin_left + (graph_width * i / 24.0);
+        cairo_move_to(cr, x, margin_top);
+        cairo_line_to(cr, x, margin_top + graph_height);
+    }
+    cairo_stroke(cr);
+
+    /* Draw axes */
+    cairo_set_source_rgb(cr, 0.0, 0.0, 0.0);
+    cairo_set_line_width(cr, 2.0);
+    cairo_rectangle(cr, margin_left, margin_top, graph_width, graph_height);
+    cairo_stroke(cr);
+
+    /* Y-axis labels (brightness %) */
+    cairo_set_font_size(cr, 10);
+    for (int i = 0; i <= 10; i++) {
+        double y = margin_top + graph_height - (graph_height * i / 10.0);
+        char label[8];
+        snprintf(label, sizeof(label), "%d%%", i * 10);
+
+        cairo_text_extents_t extents;
+        cairo_text_extents(cr, label, &extents);
+        cairo_move_to(cr, margin_left - extents.width - 5, y + extents.height / 2);
+        cairo_show_text(cr, label);
+    }
+
+    /* X-axis labels (hours) */
+    for (int i = 0; i <= 24; i += 3) {
+        double x = margin_left + (graph_width * i / 24.0);
+        char label[8];
+        snprintf(label, sizeof(label), "%dh", i);
+
+        cairo_text_extents_t extents;
+        cairo_text_extents(cr, label, &extents);
+        cairo_move_to(cr, x - extents.width / 2, margin_top + graph_height + 20);
+        cairo_show_text(cr, label);
+    }
+
+    /* Get schedule entries sorted by time */
+    int count = scheduler_get_entry_count(data->scheduler);
+    if (count == 0) {
+        return FALSE;
+    }
+
+    /* Build array of schedule points for drawing */
+    typedef struct {
+        double hour_decimal;  /* Hour as decimal (e.g., 14.5 for 14:30) */
+        int brightness;
+    } SchedulePoint;
+
+    SchedulePoint *points = g_new(SchedulePoint, count);
+
+    GList *entries = scheduler_get_entries(data->scheduler);
+    int idx = 0;
+    for (GList *item = entries; item; item = item->next) {
+        ScheduleEntry *entry = (ScheduleEntry*)item->data;
+        points[idx].hour_decimal = entry->hour + (entry->minute / 60.0);
+        points[idx].brightness = entry->brightness;
+        idx++;
+    }
+
+    /* Draw the brightness curve */
+    cairo_set_source_rgb(cr, 0.2, 0.4, 0.8);  /* Blue line */
+    cairo_set_line_width(cr, 2.5);
+
+    gboolean first = TRUE;
+    double prev_x = 0, prev_y = 0;
+
+    /* Draw from midnight to first point */
+    if (count > 0) {
+        /* Find last point (wraps from previous day) */
+        int last_brightness = points[count - 1].brightness;
+        double start_y = margin_top + graph_height - (graph_height * last_brightness / 100.0);
+
+        cairo_move_to(cr, margin_left, start_y);
+        first = FALSE;
+        prev_x = margin_left;
+        prev_y = start_y;
+    }
+
+    /* Draw line segments between schedule points */
+    for (int i = 0; i < count; i++) {
+        double x = margin_left + (graph_width * points[i].hour_decimal / 24.0);
+        double y = margin_top + graph_height - (graph_height * points[i].brightness / 100.0);
+
+        if (first) {
+            cairo_move_to(cr, x, y);
+            first = FALSE;
+        } else {
+            cairo_line_to(cr, x, y);
+        }
+
+        prev_x = x;
+        prev_y = y;
+    }
+
+    /* Draw from last point to end of day (midnight) */
+    if (count > 0) {
+        int last_brightness = points[count - 1].brightness;
+        double end_y = margin_top + graph_height - (graph_height * last_brightness / 100.0);
+        cairo_line_to(cr, margin_left + graph_width, end_y);
+    }
+
+    cairo_stroke(cr);
+
+    /* Draw points */
+    cairo_set_source_rgb(cr, 0.8, 0.2, 0.2);  /* Red dots */
+    for (int i = 0; i < count; i++) {
+        double x = margin_left + (graph_width * points[i].hour_decimal / 24.0);
+        double y = margin_top + graph_height - (graph_height * points[i].brightness / 100.0);
+
+        cairo_arc(cr, x, y, 4, 0, 2 * G_PI);
+        cairo_fill(cr);
+    }
+
+    g_free(points);
+    return FALSE;
 }
