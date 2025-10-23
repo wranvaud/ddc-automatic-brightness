@@ -1,21 +1,20 @@
 # DDC Automatic Brightness
 
-An application for controlling monitor brightness using ddccontrol with automatic scheduling and system tray support.
+A GTK application for controlling external monitor brightness using DDC/CI with automatic adjustment capabilities.
 
 ## Features
 
-✅ **Smart Monitor Detection**: Automatic DDC/CI monitor discovery  
-✅ **Hardware Auto-Detection**: Real-time detection of newly connected monitors via udev (when available)  
-✅ **Enhanced Tray Integration**: Full tray support with brightness controls and schedule preview  
-✅ **Brightness Control**: Real-time brightness adjustment with slider  
-✅ **Automatic Scheduling**: Progressive brightness adjustment throughout the day  
-✅ **Startup Options**: Run minimized to tray, --help, --tray modes  
+**Automatic Brightness Control**
+- Ambient light sensor-based adjustment with configurable curves
+- Follow main/internal monitor brightness
+- Time-based scheduled brightness throughout the day
+- Smooth gradual transitions
 
-## Recent Improvements
-
-🔌 **Hardware Auto-Detection**: Automatically detects newly connected monitors in real-time using udev events (when libudev-dev is installed). Just plug in your monitor and it appears instantly!
-
-👁️ **Schedule Transparency**: The tray menu now shows "Auto Brightness: 70%" displaying what brightness would be applied if auto-brightness were enabled, updating every minute throughout the day.
+**Monitor Control**
+- Manual brightness adjustment via slider
+- Support for multiple external monitors
+- Per-monitor configuration and settings
+- Real-time hardware detection (with udev)
 
 ## Installation
 
@@ -50,19 +49,6 @@ make package
 sudo dpkg -i ddc-automatic-brightness-gtk_1.0.0_amd64.deb
 ```
 
-### Quick Test
-
-Go to the folder src/.
-After making changes run "make".
-
-```bash
-# Test compilation
-./ddc-automatic-brightness-gtk --help
-
-# Run with tray support
-./ddc-automatic-brightness-gtk --tray
-```
-
 ## Usage
 
 ### Command Line Options
@@ -78,26 +64,23 @@ Options:
 
 ### GUI Controls
 
-1. **Monitor Selection**: Choose your monitor from dropdown (auto-refreshes when new hardware detected)
-2. **Brightness Slider**: Real-time brightness control (click to jump to position)
-3. **Auto Brightness**: Enable/disable scheduled brightness changes
-4. **Configure Schedule**: Set custom time/brightness points
-5. **Startup Options**: "Start minimized to system tray" checkbox
+**Monitor Selection**: Choose your external monitor from dropdown
 
-### System Tray Features
+**Manual Control**: Use slider for immediate brightness adjustment
 
-- **Smart Status Indicator**: Shows "X" when no monitors found, brightness percentage when available
-- **Schedule Preview**: "Auto Brightness: 70%" shows current scheduled brightness (updates every minute)
-- **Hardware Detection**: Automatically detects newly connected monitors and retries detection
-- **Brightness Quick-Select**: 20%, 25%, 35%, 50%, 70%, 100% options
+**Auto Brightness Modes**:
+- Ambient Light Sensor: Automatic adjustment based on ambient light
+- Follow Main Monitor: Match internal/main monitor brightness
+- Time Schedule: Follow daily brightness schedule
+
+**Configuration Dialogs**:
+- Configure Light Sensor Curve: Visual graph with lux-to-brightness mapping
+- Configure Schedule: 24-hour brightness timeline with visual graph
+- Luminosity Sensitivity: Adjust hysteresis to prevent flickering (0-100 lux)
 
 ### Configuration
 
-Settings stored in `~/.config/ddc_automatic_brightness.conf`:
-- Monitor selection preferences
-- Per-monitor auto brightness settings  
-- Custom brightness schedules
-- Startup options
+Settings stored in `~/.config/ddc-automatic-brightness/config.ini`:
 
 ## Technical Details
 
@@ -105,59 +88,33 @@ Settings stored in `~/.config/ddc_automatic_brightness.conf`:
 
 ```
 src/
-├── main.c              # GTK application + tray integration
-├── brightness_control.c # Monitor DDC/CI communication
-├── monitor_detect.c    # Monitor discovery via ddccontrol
-├── config.c           # GLib GKeyFile configuration
-├── scheduler.c        # Time-based brightness scheduling
-├── schedule_dialog.c  # Schedule configuration UI
-└── *.h               # Header files
+├── main.c                  # Application core and tray integration
+├── brightness_control.c    # DDC/CI monitor communication
+├── monitor_detect.c        # Monitor discovery and management
+├── light_sensor.c          # Ambient light sensor integration
+├── laptop_backlight.c      # Internal monitor brightness reading
+├── scheduler.c             # Time-based brightness scheduling
+├── config.c                # Configuration management
+├── *_dialog.c              # Configuration UI dialogs
+└── *.h                     # Header files
 ```
 
 ### Dependencies
 
-- **GTK 3.0**: Modern GUI framework
+- **GTK 3.0**: GUI framework
 - **GLib 2.0**: Core utilities and configuration
 - **libayatana-appindicator3**: System tray support
-- **ddccontrol**: Monitor communication
-- **libudev** (optional): Hardware auto-detection for newly connected monitors
+- **ddccontrol**: DDC/CI monitor communication
+- **libudev** (optional): Hardware auto-detection
+- **Cairo**: Graph rendering
 
-## Development
+### Ambient Light Sensor Requirements
 
-### Building
-
-```bash
-make clean && make  # Clean build
-make debug          # Debug version with symbols
-make test           # Basic functionality tests
-```
-
-### Package Creation
-
-```bash
-make package        # Creates .deb package
-make install        # System-wide installation
-make uninstall      # Complete removal
-```
-
-### Contributing
-
-This implementation uses patterns consistent with the ddccontrol project and could potentially be contributed upstream as an enhanced GUI with automatic brightness features.
+Requires IIO (Industrial I/O) ambient light sensor via `/sys/bus/iio/devices/`. Supported on laptops with built-in ALS hardware.
 
 ## Troubleshooting
 
-### No Tray Icon
-```bash
-# Install tray support
-sudo apt install libayatana-appindicator3-dev
-
-# Check if tray is detected
-make check-deps
-```
-
 ### No Monitors Detected
-
-The app now uses intelligent retry logic - it will automatically retry detection at 30s, 90s, and 180s after startup. You'll see an "X" in the tray icon when no monitors are found.
 
 ```bash
 # Test ddccontrol directly
@@ -167,30 +124,40 @@ sudo ddccontrol -p
 sudo usermod -a -G i2c $USER
 # Log out and back in
 
-# For immediate detection, click "Refresh Monitors" in the GUI
+# Manual refresh in GUI
+Click "Refresh Monitors" button
+```
+
+### Brightness Not Changing
+
+```bash
+# Verify DDC/CI support
+sudo ddccontrol dev:/dev/i2c-X -r 0x10
+
+# Check monitor is available
+The app shows monitor status in the dropdown
+```
+
+### No Tray Icon
+
+```bash
+# Install tray support
+sudo apt install libayatana-appindicator3-dev
+
+# Rebuild
+make clean && make
 ```
 
 ### Hardware Auto-Detection Not Working
+
 ```bash
 # Install udev development headers
 sudo apt install libudev-dev
 
-# Rebuild with hardware detection support
-make clean && make
-
-# Check if hardware detection is enabled
-make check-deps
-```
-
-### Compilation Errors
-```bash
-# Verify all dependencies
-make check-deps
-
-# Check Ubuntu/Debian packages
-sudo apt install build-essential libgtk-3-dev libglib2.0-dev
+# Rebuild with hardware detection
+make clean && make check-deps && make
 ```
 
 ## License
 
-The project is licensed under `GNU General Public License v2.0` license.
+GNU General Public License v2.0
