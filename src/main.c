@@ -129,6 +129,9 @@ static void cleanup_udev_monitoring(void);
 static gboolean on_udev_event(GIOChannel *channel, GIOCondition condition, gpointer data);
 #endif
 
+/* Deferred mode change callback declaration (used by both windowed and tray modes) */
+static gboolean deferred_mode_change_callback(gpointer user_data);
+
 #if HAVE_APPINDICATOR
 static void setup_tray_indicator(void);
 static void on_indicator_brightness_20(GtkMenuItem *item, gpointer data);
@@ -145,7 +148,6 @@ static void on_indicator_quit(GtkMenuItem *item, gpointer data);
 static void update_indicator_menu(void);
 static void on_indicator_menu_show(GtkWidget *menu, gpointer data);
 static void update_tray_icon_label(void);
-static gboolean menu_update_idle_callback(gpointer data);
 #endif
 
 /* Main entry point */
@@ -491,62 +493,13 @@ static void on_auto_brightness_mode_changed(GtkToggleButton *button, gpointer da
         mode = AUTO_BRIGHTNESS_MODE_LAPTOP_DISPLAY;
     }
 
-    /* Save setting per monitor */
+    /* Save setting per monitor (fast, in-memory only) */
     config_set_monitor_auto_brightness_mode(app_data.config,
                                             monitor_get_device_path(app_data.current_monitor),
                                             mode);
 
-    /* Apply brightness via gradual transition based on the new mode */
-    if (mode == AUTO_BRIGHTNESS_MODE_TIME_SCHEDULE) {
-        /* Apply current scheduled brightness via gradual transition */
-        int target_brightness = scheduler_get_current_brightness(app_data.scheduler);
-        if (target_brightness >= 0) {
-            monitor_set_target_brightness(app_data.current_monitor, target_brightness);
-            g_message("Scheduled brightness: setting target to %d%%", target_brightness);
-        }
-    } else if (mode == AUTO_BRIGHTNESS_MODE_LIGHT_SENSOR) {
-        /* Apply light sensor-based brightness via gradual transition */
-        if (light_sensor_is_available(app_data.light_sensor)) {
-            /* Load the curve for this monitor */
-            load_light_sensor_curve_for_monitor(monitor_get_device_path(app_data.current_monitor));
-
-            double lux = light_sensor_read_lux(app_data.light_sensor);
-            if (lux >= 0) {
-                int target_brightness = light_sensor_calculate_brightness(app_data.light_sensor, lux);
-                if (target_brightness >= 0) {
-                    /* Set stable lux when mode is first enabled */
-                    monitor_set_stable_lux(app_data.current_monitor, lux);
-                    monitor_set_target_brightness(app_data.current_monitor, target_brightness);
-                    g_message("Light sensor: %.1f lux -> %d%% brightness (mode enabled, gradual transition)",
-                             lux, target_brightness);
-                }
-            }
-        }
-    } else if (mode == AUTO_BRIGHTNESS_MODE_LAPTOP_DISPLAY) {
-        /* Apply laptop display-based brightness via gradual transition */
-        if (laptop_backlight_is_available(app_data.laptop_backlight)) {
-            int laptop_brightness = laptop_backlight_read_brightness(app_data.laptop_backlight);
-            if (laptop_brightness >= 0) {
-                /* Apply brightness offset */
-                int offset = config_get_monitor_brightness_offset(app_data.config,
-                                                                  monitor_get_device_path(app_data.current_monitor));
-                int target_brightness = laptop_brightness + offset;
-
-                /* Clamp to 0-100 range */
-                if (target_brightness < 0) target_brightness = 0;
-                if (target_brightness > 100) target_brightness = 100;
-
-                monitor_set_target_brightness(app_data.current_monitor, target_brightness);
-                g_message("Laptop display: %d%% + offset %d%% -> %d%% brightness (gradual transition)",
-                         laptop_brightness, offset, target_brightness);
-            }
-        }
-    }
-
-#if HAVE_APPINDICATOR
-    /* Schedule menu and icon update in idle callback for immediate visual feedback */
-    g_idle_add(menu_update_idle_callback, NULL);
-#endif
+    /* Schedule high-priority callback for I/O operations (runs within ~1ms) */
+    g_timeout_add(1, deferred_mode_change_callback, GINT_TO_POINTER(mode));
 }
 
 /* Schedule configuration button clicked */
@@ -1579,67 +1532,157 @@ static void on_indicator_brightness_100(GtkMenuItem *item, gpointer data)
     }
 }
 
-#if HAVE_APPINDICATOR
-/* Idle callback to update menu - ensures GTK event loop has processed the click */
-static gboolean menu_update_idle_callback(gpointer data)
+/* Deferred mode change callback - does the heavy I/O work after UI updates
+ * This is called for MANUAL mode changes (user clicking), so brightness should change INSTANTLY.
+ * Automatic adjustments (60s timer) use their own path with gradual transitions. */
+static gboolean deferred_mode_change_callback(gpointer user_data)
 {
-    (void)data;
-    update_indicator_menu();
-    update_tray_icon_label();
-    return FALSE; /* Remove this idle callback after one execution */
+    AutoBrightnessMode mode = GPOINTER_TO_INT(user_data);
+
+    if (!app_data.current_monitor) {
+        return FALSE;
+    }
+
+    int new_brightness = -1;
+
+    /* Calculate the appropriate brightness based on the new mode */
+    if (mode == AUTO_BRIGHTNESS_MODE_TIME_SCHEDULE) {
+        /* Apply current scheduled brightness immediately */
+        new_brightness = scheduler_get_current_brightness(app_data.scheduler);
+        if (new_brightness >= 0) {
+            g_message("Scheduled brightness: setting immediately to %d%%", new_brightness);
+        }
+    } else if (mode == AUTO_BRIGHTNESS_MODE_LIGHT_SENSOR) {
+        /* Apply light sensor-based brightness immediately */
+        if (light_sensor_is_available(app_data.light_sensor)) {
+            /* Load the curve for this monitor */
+            load_light_sensor_curve_for_monitor(monitor_get_device_path(app_data.current_monitor));
+
+            double lux = light_sensor_read_lux(app_data.light_sensor);
+            if (lux >= 0) {
+                new_brightness = light_sensor_calculate_brightness(app_data.light_sensor, lux);
+                if (new_brightness >= 0) {
+                    /* Set stable lux when mode is first enabled */
+                    monitor_set_stable_lux(app_data.current_monitor, lux);
+                    g_message("Light sensor: %.1f lux -> %d%% brightness (mode enabled, applying immediately)",
+                             lux, new_brightness);
+                }
+            }
+        }
+    } else if (mode == AUTO_BRIGHTNESS_MODE_LAPTOP_DISPLAY) {
+        /* Apply laptop display-based brightness immediately */
+        if (laptop_backlight_is_available(app_data.laptop_backlight)) {
+            int laptop_brightness = laptop_backlight_read_brightness(app_data.laptop_backlight);
+            if (laptop_brightness >= 0) {
+                /* Apply brightness offset */
+                int offset = config_get_monitor_brightness_offset(app_data.config,
+                                                                  monitor_get_device_path(app_data.current_monitor));
+                new_brightness = laptop_brightness + offset;
+
+                /* Clamp to 0-100 range */
+                if (new_brightness < 0) new_brightness = 0;
+                if (new_brightness > 100) new_brightness = 100;
+
+                g_message("Laptop display: %d%% + offset %d%% -> %d%% brightness (applying immediately)",
+                         laptop_brightness, offset, new_brightness);
+            }
+        }
+    }
+
+    /* Apply brightness IMMEDIATELY (not gradual) for manual mode changes */
+    if (new_brightness >= 0) {
+        monitor_set_brightness_with_retry(app_data.current_monitor, new_brightness, auto_refresh_monitors_on_failure);
+
+        /* Clear any pending target brightness (no gradual transition needed) */
+        monitor_set_target_brightness(app_data.current_monitor, -1);
+
+        /* Update UI to reflect the new brightness (also updates tray icon and menu) */
+        app_data.updating_from_auto = TRUE;
+        gtk_range_set_value(GTK_RANGE(app_data.brightness_scale), new_brightness);
+        app_data.updating_from_auto = FALSE;
+        update_brightness_display();  /* This calls update_tray_icon_label() and update_indicator_menu() */
+    }
+
+    return FALSE; /* Remove this timeout callback after one execution */
 }
-#endif
 
 static void on_indicator_auto_schedule(GtkMenuItem *item, gpointer data)
 {
+    (void)item;
     (void)data;
     if (app_data.current_monitor) {
-#if HAVE_APPINDICATOR
-        /* Immediately update this menu item's checkmark for instant visual feedback */
-        if (GTK_IS_CHECK_MENU_ITEM(item)) {
-            gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(item), TRUE);
-        }
-#endif
+        /* Save config directly without triggering radio button callback */
+        config_set_monitor_auto_brightness_mode(app_data.config,
+                                                monitor_get_device_path(app_data.current_monitor),
+                                                AUTO_BRIGHTNESS_MODE_TIME_SCHEDULE);
+
+        /* Update radio button without triggering its callback (to prevent duplicate work) */
+        g_signal_handlers_block_by_func(app_data.auto_brightness_schedule_radio,
+                                       G_CALLBACK(on_auto_brightness_mode_changed), NULL);
         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app_data.auto_brightness_schedule_radio), TRUE);
+        g_signal_handlers_unblock_by_func(app_data.auto_brightness_schedule_radio,
+                                         G_CALLBACK(on_auto_brightness_mode_changed), NULL);
+
 #if HAVE_APPINDICATOR
-        /* Schedule full menu update in idle callback */
-        g_idle_add(menu_update_idle_callback, NULL);
+        /* Update menu immediately to show new mode as active */
+        update_indicator_menu();
+
+        /* Schedule high-priority callback for I/O operations (runs within ~1ms) */
+        g_timeout_add(1, deferred_mode_change_callback, GINT_TO_POINTER(AUTO_BRIGHTNESS_MODE_TIME_SCHEDULE));
 #endif
     }
 }
 
 static void on_indicator_auto_sensor(GtkMenuItem *item, gpointer data)
 {
+    (void)item;
     (void)data;
     if (app_data.current_monitor && light_sensor_is_available(app_data.light_sensor)) {
-#if HAVE_APPINDICATOR
-        /* Immediately update this menu item's checkmark for instant visual feedback */
-        if (GTK_IS_CHECK_MENU_ITEM(item)) {
-            gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(item), TRUE);
-        }
-#endif
+        /* Save config directly without triggering radio button callback */
+        config_set_monitor_auto_brightness_mode(app_data.config,
+                                                monitor_get_device_path(app_data.current_monitor),
+                                                AUTO_BRIGHTNESS_MODE_LIGHT_SENSOR);
+
+        /* Update radio button without triggering its callback (to prevent duplicate work) */
+        g_signal_handlers_block_by_func(app_data.auto_brightness_sensor_radio,
+                                       G_CALLBACK(on_auto_brightness_mode_changed), NULL);
         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app_data.auto_brightness_sensor_radio), TRUE);
+        g_signal_handlers_unblock_by_func(app_data.auto_brightness_sensor_radio,
+                                         G_CALLBACK(on_auto_brightness_mode_changed), NULL);
+
 #if HAVE_APPINDICATOR
-        /* Schedule full menu update in idle callback */
-        g_idle_add(menu_update_idle_callback, NULL);
+        /* Update menu immediately to show new mode as active */
+        update_indicator_menu();
+
+        /* Schedule high-priority callback for I/O operations (runs within ~1ms) */
+        g_timeout_add(1, deferred_mode_change_callback, GINT_TO_POINTER(AUTO_BRIGHTNESS_MODE_LIGHT_SENSOR));
 #endif
     }
 }
 
 static void on_indicator_auto_main_display(GtkMenuItem *item, gpointer data)
 {
+    (void)item;
     (void)data;
     if (app_data.current_monitor && laptop_backlight_is_available(app_data.laptop_backlight)) {
-#if HAVE_APPINDICATOR
-        /* Immediately update this menu item's checkmark for instant visual feedback */
-        if (GTK_IS_CHECK_MENU_ITEM(item)) {
-            gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(item), TRUE);
-        }
-#endif
+        /* Save config directly without triggering radio button callback */
+        config_set_monitor_auto_brightness_mode(app_data.config,
+                                                monitor_get_device_path(app_data.current_monitor),
+                                                AUTO_BRIGHTNESS_MODE_LAPTOP_DISPLAY);
+
+        /* Update radio button without triggering its callback (to prevent duplicate work) */
+        g_signal_handlers_block_by_func(app_data.auto_brightness_laptop_radio,
+                                       G_CALLBACK(on_auto_brightness_mode_changed), NULL);
         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app_data.auto_brightness_laptop_radio), TRUE);
+        g_signal_handlers_unblock_by_func(app_data.auto_brightness_laptop_radio,
+                                         G_CALLBACK(on_auto_brightness_mode_changed), NULL);
+
 #if HAVE_APPINDICATOR
-        /* Schedule full menu update in idle callback */
-        g_idle_add(menu_update_idle_callback, NULL);
+        /* Update menu immediately to show new mode as active */
+        update_indicator_menu();
+
+        /* Schedule high-priority callback for I/O operations (runs within ~1ms) */
+        g_timeout_add(1, deferred_mode_change_callback, GINT_TO_POINTER(AUTO_BRIGHTNESS_MODE_LAPTOP_DISPLAY));
 #endif
     }
 }
