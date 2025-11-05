@@ -145,6 +145,7 @@ static void on_indicator_quit(GtkMenuItem *item, gpointer data);
 static void update_indicator_menu(void);
 static void on_indicator_menu_show(GtkWidget *menu, gpointer data);
 static void update_tray_icon_label(void);
+static gboolean menu_update_idle_callback(gpointer data);
 #endif
 
 /* Main entry point */
@@ -541,6 +542,11 @@ static void on_auto_brightness_mode_changed(GtkToggleButton *button, gpointer da
             }
         }
     }
+
+#if HAVE_APPINDICATOR
+    /* Schedule menu and icon update in idle callback for immediate visual feedback */
+    g_idle_add(menu_update_idle_callback, NULL);
+#endif
 }
 
 /* Schedule configuration button clicked */
@@ -1573,27 +1579,68 @@ static void on_indicator_brightness_100(GtkMenuItem *item, gpointer data)
     }
 }
 
+#if HAVE_APPINDICATOR
+/* Idle callback to update menu - ensures GTK event loop has processed the click */
+static gboolean menu_update_idle_callback(gpointer data)
+{
+    (void)data;
+    update_indicator_menu();
+    update_tray_icon_label();
+    return FALSE; /* Remove this idle callback after one execution */
+}
+#endif
+
 static void on_indicator_auto_schedule(GtkMenuItem *item, gpointer data)
 {
-    (void)item; (void)data;
+    (void)data;
     if (app_data.current_monitor) {
+#if HAVE_APPINDICATOR
+        /* Immediately update this menu item's checkmark for instant visual feedback */
+        if (GTK_IS_CHECK_MENU_ITEM(item)) {
+            gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(item), TRUE);
+        }
+#endif
         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app_data.auto_brightness_schedule_radio), TRUE);
+#if HAVE_APPINDICATOR
+        /* Schedule full menu update in idle callback */
+        g_idle_add(menu_update_idle_callback, NULL);
+#endif
     }
 }
 
 static void on_indicator_auto_sensor(GtkMenuItem *item, gpointer data)
 {
-    (void)item; (void)data;
+    (void)data;
     if (app_data.current_monitor && light_sensor_is_available(app_data.light_sensor)) {
+#if HAVE_APPINDICATOR
+        /* Immediately update this menu item's checkmark for instant visual feedback */
+        if (GTK_IS_CHECK_MENU_ITEM(item)) {
+            gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(item), TRUE);
+        }
+#endif
         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app_data.auto_brightness_sensor_radio), TRUE);
+#if HAVE_APPINDICATOR
+        /* Schedule full menu update in idle callback */
+        g_idle_add(menu_update_idle_callback, NULL);
+#endif
     }
 }
 
 static void on_indicator_auto_main_display(GtkMenuItem *item, gpointer data)
 {
-    (void)item; (void)data;
+    (void)data;
     if (app_data.current_monitor && laptop_backlight_is_available(app_data.laptop_backlight)) {
+#if HAVE_APPINDICATOR
+        /* Immediately update this menu item's checkmark for instant visual feedback */
+        if (GTK_IS_CHECK_MENU_ITEM(item)) {
+            gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(item), TRUE);
+        }
+#endif
         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app_data.auto_brightness_laptop_radio), TRUE);
+#if HAVE_APPINDICATOR
+        /* Schedule full menu update in idle callback */
+        g_idle_add(menu_update_idle_callback, NULL);
+#endif
     }
 }
 
@@ -1767,21 +1814,45 @@ static void update_indicator_menu(void)
 
                 if (strncmp(label, "  Time-based", 12) == 0) {
                     is_active = (mode == AUTO_BRIGHTNESS_MODE_TIME_SCHEDULE);
-                    if (schedule_brightness >= 0) {
+                    if (is_active) {
+                        /* When active, show the actual brightness being used (same as tray icon) */
+                        int actual_brightness = monitor_get_current_brightness(app_data.current_monitor);
+                        if (actual_brightness < 0) {
+                            actual_brightness = (int)gtk_range_get_value(GTK_RANGE(app_data.brightness_scale));
+                        }
+                        snprintf(new_label, sizeof(new_label), "  Time-based schedule (%d%%)", actual_brightness);
+                    } else if (schedule_brightness >= 0) {
+                        /* When inactive, show preview of what it would set */
                         snprintf(new_label, sizeof(new_label), "  Time-based schedule (%d%%)", schedule_brightness);
                     } else {
                         snprintf(new_label, sizeof(new_label), "  Time-based schedule");
                     }
                 } else if (strncmp(label, "  Ambient", 9) == 0) {
                     is_active = (mode == AUTO_BRIGHTNESS_MODE_LIGHT_SENSOR);
-                    if (sensor_brightness >= 0) {
+                    if (is_active) {
+                        /* When active, show the actual brightness being used (same as tray icon) */
+                        int actual_brightness = monitor_get_current_brightness(app_data.current_monitor);
+                        if (actual_brightness < 0) {
+                            actual_brightness = (int)gtk_range_get_value(GTK_RANGE(app_data.brightness_scale));
+                        }
+                        snprintf(new_label, sizeof(new_label), "  Ambient light sensor (%d%%)", actual_brightness);
+                    } else if (sensor_brightness >= 0) {
+                        /* When inactive, show preview of what it would set */
                         snprintf(new_label, sizeof(new_label), "  Ambient light sensor (%d%%)", sensor_brightness);
                     } else {
                         snprintf(new_label, sizeof(new_label), "  Ambient light sensor");
                     }
                 } else if (strncmp(label, "  Follow", 8) == 0) {
                     is_active = (mode == AUTO_BRIGHTNESS_MODE_LAPTOP_DISPLAY);
-                    if (main_display_brightness >= 0) {
+                    if (is_active) {
+                        /* When active, show the actual brightness being used (same as tray icon) */
+                        int actual_brightness = monitor_get_current_brightness(app_data.current_monitor);
+                        if (actual_brightness < 0) {
+                            actual_brightness = (int)gtk_range_get_value(GTK_RANGE(app_data.brightness_scale));
+                        }
+                        snprintf(new_label, sizeof(new_label), "  Follow main display (%d%%)", actual_brightness);
+                    } else if (main_display_brightness >= 0) {
+                        /* When inactive, show preview of what it would set */
                         snprintf(new_label, sizeof(new_label), "  Follow main display (%d%%)", main_display_brightness);
                     } else {
                         snprintf(new_label, sizeof(new_label), "  Follow main display");
