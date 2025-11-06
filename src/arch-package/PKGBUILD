@@ -1,6 +1,6 @@
 # Maintainer: "DDC Automatic Brightness Team <noreply@example.com>"
 pkgname=ddc-automatic-brightness-gtk
-pkgver=1.0.0
+pkgver=1.1.0
 pkgrel=1
 pkgdesc="GUI application for automatic monitor brightness control with smart hardware detection"
 arch=('x86_64' 'aarch64')

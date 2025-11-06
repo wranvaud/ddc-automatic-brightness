@@ -46,7 +46,7 @@ sudo make install
 
 # Or create package for distribution
 make package
-sudo dpkg -i ddc-automatic-brightness-gtk_1.0.0_amd64.deb
+sudo dpkg -i ddc-automatic-brightness-gtk_1.1.0_amd64.deb
 ```
 
 ## Usage
