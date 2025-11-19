@@ -107,7 +107,7 @@ static void on_brightness_offset_changed(GtkRange *range, gpointer data);
 static void on_schedule_clicked(GtkButton *button, gpointer data);
 static void on_curve_clicked(GtkButton *button, gpointer data);
 static void on_refresh_monitors_clicked(GtkButton *button, gpointer data);
-static void load_light_sensor_curve_for_monitor(const char *device_path);
+static void load_light_sensor_curve_for_monitor(const char *device_path, const char *reason);
 static void on_start_minimized_toggled(GtkToggleButton *button, gpointer data);
 static void on_show_brightness_tray_toggled(GtkToggleButton *button, gpointer data);
 static void on_show_light_level_tray_toggled(GtkToggleButton *button, gpointer data);
@@ -354,6 +354,16 @@ static void on_monitor_changed(GtkComboBox *combo, gpointer data)
             AutoBrightnessMode mode = config_get_monitor_auto_brightness_mode(app_data.config,
                                                                               monitor_get_device_path(app_data.current_monitor));
 
+            /* Block radio button signals to prevent cascading callbacks during monitor refresh */
+            g_signal_handlers_block_by_func(app_data.auto_brightness_disabled_radio,
+                                           G_CALLBACK(on_auto_brightness_mode_changed), NULL);
+            g_signal_handlers_block_by_func(app_data.auto_brightness_schedule_radio,
+                                           G_CALLBACK(on_auto_brightness_mode_changed), NULL);
+            g_signal_handlers_block_by_func(app_data.auto_brightness_sensor_radio,
+                                           G_CALLBACK(on_auto_brightness_mode_changed), NULL);
+            g_signal_handlers_block_by_func(app_data.auto_brightness_laptop_radio,
+                                           G_CALLBACK(on_auto_brightness_mode_changed), NULL);
+
             /* Update radio buttons based on mode */
             switch (mode) {
                 case AUTO_BRIGHTNESS_MODE_DISABLED:
@@ -369,6 +379,16 @@ static void on_monitor_changed(GtkComboBox *combo, gpointer data)
                     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app_data.auto_brightness_laptop_radio), TRUE);
                     break;
             }
+
+            /* Unblock radio button signals */
+            g_signal_handlers_unblock_by_func(app_data.auto_brightness_disabled_radio,
+                                             G_CALLBACK(on_auto_brightness_mode_changed), NULL);
+            g_signal_handlers_unblock_by_func(app_data.auto_brightness_schedule_radio,
+                                             G_CALLBACK(on_auto_brightness_mode_changed), NULL);
+            g_signal_handlers_unblock_by_func(app_data.auto_brightness_sensor_radio,
+                                             G_CALLBACK(on_auto_brightness_mode_changed), NULL);
+            g_signal_handlers_unblock_by_func(app_data.auto_brightness_laptop_radio,
+                                             G_CALLBACK(on_auto_brightness_mode_changed), NULL);
 
             /* Load brightness offset for this monitor */
             int offset = config_get_monitor_brightness_offset(app_data.config,
@@ -440,9 +460,15 @@ static void on_brightness_offset_changed(GtkRange *range, gpointer data)
 }
 
 /* Load the light sensor curve for a specific monitor from config */
-static void load_light_sensor_curve_for_monitor(const char *device_path)
+static void load_light_sensor_curve_for_monitor(const char *device_path, const char *reason)
 {
     if (!device_path || !app_data.light_sensor) {
+        return;
+    }
+
+    /* Skip configuration reload during monitor refresh to prevent feedback loops */
+    if (app_data.in_monitor_refresh) {
+        g_debug("Skipping curve load during monitor refresh for %s (reason: %s)", device_path, reason);
         return;
     }
 
@@ -452,7 +478,7 @@ static void load_light_sensor_curve_for_monitor(const char *device_path)
 
     if (config_load_light_sensor_curve(app_data.config, device_path, &points, &count)) {
         /* Successfully loaded curve from config */
-        g_message("Loaded %d curve points for monitor %s", count, device_path);
+        g_message("Loaded %d curve points for monitor %s [%s]", count, device_path, reason);
 
         /* Apply the curve to the light sensor */
         if (count >= 2) {
@@ -623,7 +649,7 @@ static gboolean auto_brightness_timer_callback(gpointer data)
                 /* Apply light sensor-based brightness with hysteresis */
                 if (light_sensor_is_available(app_data.light_sensor)) {
                     /* Load the curve for this monitor */
-                    load_light_sensor_curve_for_monitor(monitor_get_device_path(monitor));
+                    load_light_sensor_curve_for_monitor(monitor_get_device_path(monitor), "auto brightness timer");
 
                     double lux = light_sensor_read_lux(app_data.light_sensor);
                     if (lux >= 0) {
@@ -1124,6 +1150,17 @@ static gboolean recheck_monitors_immediately(gpointer data)
 /* Auto-refresh monitors when DDC communication fails */
 static gboolean auto_refresh_monitors_on_failure(void)
 {
+    /* Rate limiting: prevent refresh more than once per second */
+    static time_t last_refresh_time = 0;
+    time_t current_time = time(NULL);
+
+    if (current_time - last_refresh_time < 1) {
+        g_message("Auto-refresh rate limited (last refresh %.0f seconds ago)",
+                  difftime(current_time, last_refresh_time));
+        return FALSE;
+    }
+
+    last_refresh_time = current_time;
     g_message("DDC communication failed, auto-refreshing monitors...");
 
     /* Set flag to prevent recursion during refresh */
@@ -1556,7 +1593,7 @@ static gboolean deferred_mode_change_callback(gpointer user_data)
         /* Apply light sensor-based brightness immediately */
         if (light_sensor_is_available(app_data.light_sensor)) {
             /* Load the curve for this monitor */
-            load_light_sensor_curve_for_monitor(monitor_get_device_path(app_data.current_monitor));
+            load_light_sensor_curve_for_monitor(monitor_get_device_path(app_data.current_monitor), "user mode change");
 
             double lux = light_sensor_read_lux(app_data.light_sensor);
             if (lux >= 0) {
@@ -1809,7 +1846,7 @@ static void update_indicator_menu(void)
     int main_display_brightness = -1;
 
     if (light_sensor_is_available(app_data.light_sensor) && app_data.current_monitor) {
-        load_light_sensor_curve_for_monitor(monitor_get_device_path(app_data.current_monitor));
+        load_light_sensor_curve_for_monitor(monitor_get_device_path(app_data.current_monitor), "tray menu update");
         double lux = light_sensor_read_lux(app_data.light_sensor);
         if (lux >= 0) {
             sensor_brightness = light_sensor_calculate_brightness(app_data.light_sensor, lux);

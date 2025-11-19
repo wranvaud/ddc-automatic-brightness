@@ -256,17 +256,25 @@ gboolean monitor_set_brightness_with_retry(Monitor *monitor, int brightness, Mon
     /* First attempt */
     gboolean success = monitor_set_brightness(monitor, brightness);
 
-    /* If first attempt failed and we have a refresh callback, trigger auto-refresh */
+    /* If first attempt failed and we have a refresh callback, trigger auto-refresh
+     * The refresh_callback itself now has rate limiting to prevent runaway loops */
     if (!success && refresh_callback && monitor->available == FALSE) {
-        g_message("Brightness set failed, attempting auto-refresh...");
+        /* Only trigger refresh if this is a new failure, not a redundant retry attempt
+         * Skip if brightness value hasn't changed - this prevents feedback loops from
+         * repeated set attempts with the same value */
+        if (monitor->current_brightness != brightness) {
+            g_message("Brightness set failed (monitor unavailable), attempting auto-refresh...");
 
-        /* Trigger refresh - this may recreate monitor objects.
-         * We don't retry here because the monitor pointer may be stale after refresh.
-         * The caller should retry with the updated monitor reference. */
-        if (refresh_callback()) {
-            g_message("Auto-refresh completed - caller should retry with updated monitor");
+            /* Trigger refresh - this may recreate monitor objects.
+             * We don't retry here because the monitor pointer may be stale after refresh.
+             * The caller should retry with the updated monitor reference. */
+            if (refresh_callback()) {
+                g_message("Auto-refresh completed - caller should retry with updated monitor");
+            } else {
+                g_warning("Auto-refresh failed");
+            }
         } else {
-            g_warning("Auto-refresh failed");
+            g_debug("Skipping auto-refresh for redundant brightness set attempt");
         }
     }
 
