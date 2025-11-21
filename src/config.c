@@ -113,24 +113,24 @@ gboolean config_save(AppConfig *config)
 }
 
 /* Get default monitor device path */
-const char* config_get_default_monitor(AppConfig *config)
+char* config_get_default_monitor(AppConfig *config)
 {
     if (!config) {
         return NULL;
     }
-    
+
     GError *error = NULL;
-    char *value = g_key_file_get_string(config->keyfile, 
+    char *value = g_key_file_get_string(config->keyfile,
                                        CONFIG_GROUP_GENERAL,
                                        "default_monitor",
                                        &error);
-    
+
     if (error) {
         g_error_free(error);
         return NULL;
     }
-    
-    /* Note: caller should not free this value, it's managed by the keyfile */
+
+    /* Note: caller must free the returned string with g_free() */
     return value;
 }
 

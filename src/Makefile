@@ -95,7 +95,7 @@ clean:
 	rm -f $(OBJECTS) $(TARGET)
 
 # Package version and info
-PKG_VERSION = 1.1.0
+PKG_VERSION = 1.1.1
 PKG_NAME = ddc-automatic-brightness-gtk
 PKG_DESC = "GUI application for automatic monitor brightness control with smart hardware detection"
 PKG_LONG_DESC = "A modern GTK+ application that provides automatic brightness scheduling for DDC/CI compatible monitors. Features include real-time hardware detection via udev, intelligent startup retry logic, schedule transparency in system tray, and plug-and-play monitor support."

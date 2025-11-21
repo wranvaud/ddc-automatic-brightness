@@ -39,6 +39,18 @@
 #include "laptop_backlight.h"
 #include "light_sensor_dialog.h"
 
+/* Application version information */
+#define APP_VERSION "1.1.1"
+#define APP_NAME "DDC Automatic Brightness"
+#define APP_AUTHOR "Drilix LTDA"
+
+/* Timer and delay constants */
+#define AUTO_BRIGHTNESS_INTERVAL_SECONDS 5
+#define BRIGHTNESS_TRANSITION_INTERVAL_MS 200
+#define MONITOR_RETRY_INITIAL_SECONDS 30
+#define MONITOR_REFRESH_RATE_LIMIT_SECONDS 1
+#define UDEV_DEBOUNCE_SECONDS 2
+
 /* Global application state */
 typedef struct {
     GtkWidget *main_window;
@@ -79,6 +91,7 @@ typedef struct {
 
     /* Monitor detection retry state */
     guint monitor_retry_timer;
+    guint recheck_timer_id;
     int monitor_retry_attempt;
     gboolean monitors_found;
     
@@ -107,6 +120,7 @@ static void on_brightness_offset_changed(GtkRange *range, gpointer data);
 static void on_schedule_clicked(GtkButton *button, gpointer data);
 static void on_curve_clicked(GtkButton *button, gpointer data);
 static void on_refresh_monitors_clicked(GtkButton *button, gpointer data);
+static void on_about_clicked(GtkButton *button, gpointer data);
 static void load_light_sensor_curve_for_monitor(const char *device_path, const char *reason);
 static void on_start_minimized_toggled(GtkToggleButton *button, gpointer data);
 static void on_show_brightness_tray_toggled(GtkToggleButton *button, gpointer data);
@@ -237,12 +251,12 @@ int main(int argc, char *argv[])
 #endif
     
     /* Start timer for menu updates and auto brightness (runs always) */
-    app_data.auto_brightness_timer = g_timeout_add_seconds(5,
+    app_data.auto_brightness_timer = g_timeout_add_seconds(AUTO_BRIGHTNESS_INTERVAL_SECONDS,
                                                           auto_brightness_timer_callback,
                                                           &app_data);
 
     /* Start timer for gradual brightness transitions (runs every 0.2 seconds for smooth 1% steps) */
-    app_data.brightness_transition_timer = g_timeout_add(200,  /* 200 milliseconds = 0.2 seconds */
+    app_data.brightness_transition_timer = g_timeout_add(BRIGHTNESS_TRANSITION_INTERVAL_MS,
                                                          brightness_transition_timer_callback,
                                                          &app_data);
 
@@ -405,6 +419,11 @@ static void on_monitor_changed(GtkComboBox *combo, gpointer data)
                 snprintf(offset_text, sizeof(offset_text), "%d%%", offset);
             }
             gtk_label_set_text(GTK_LABEL(app_data.brightness_offset_label), offset_text);
+
+            /* Load light sensor curve for this monitor (only when monitor changes) */
+            if (light_sensor_is_available(app_data.light_sensor)) {
+                load_light_sensor_curve_for_monitor(monitor_get_device_path(app_data.current_monitor), "monitor changed");
+            }
         }
     }
 }
@@ -553,6 +572,11 @@ static void on_curve_clicked(GtkButton *button, gpointer data)
 
     /* Open curve configuration dialog */
     show_light_sensor_dialog(app_data.main_window, app_data.config, device_path, display_name);
+
+    /* Reload the curve after dialog closes (user may have saved changes) */
+    if (light_sensor_is_available(app_data.light_sensor)) {
+        load_light_sensor_curve_for_monitor(device_path, "curve dialog closed");
+    }
 }
 
 /* Refresh monitors button clicked */
@@ -568,6 +592,94 @@ static void on_refresh_monitors_clicked(GtkButton *button, gpointer data)
     app_data.monitor_retry_attempt = -2;  /* Special value for manual refresh */
     load_monitors();
     app_data.monitor_retry_attempt = 0;   /* Reset after manual refresh */
+}
+
+/* About button callback - shows application information */
+static void on_about_clicked(GtkButton *button, gpointer data)
+{
+    (void)button; (void)data;
+
+    /* Get current date for build date */
+    time_t now = time(NULL);
+    struct tm *build_time = localtime(&now);
+    char build_date[64];
+    strftime(build_date, sizeof(build_date), "%Y-%m-%d", build_time);
+
+    /* Create a plain dialog (silent, no sound) */
+    GtkWidget *about_dialog = gtk_dialog_new_with_buttons(
+        "About",
+        GTK_WINDOW(app_data.main_window),
+        GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT,
+        "OK",
+        GTK_RESPONSE_OK,
+        NULL);
+
+    /* Get content area */
+    GtkWidget *content_area = gtk_dialog_get_content_area(GTK_DIALOG(about_dialog));
+    gtk_container_set_border_width(GTK_CONTAINER(content_area), 20);
+
+    /* Create vertical box for content */
+    GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
+    gtk_container_add(GTK_CONTAINER(content_area), vbox);
+
+    /* App name and version */
+    char *title_text = g_strdup_printf("<span size='large' weight='bold'>%s v%s</span>", APP_NAME, APP_VERSION);
+    GtkWidget *title_label = gtk_label_new(NULL);
+    gtk_label_set_markup(GTK_LABEL(title_label), title_text);
+    gtk_box_pack_start(GTK_BOX(vbox), title_label, FALSE, FALSE, 5);
+    g_free(title_text);
+
+    /* Description */
+    GtkWidget *desc_label = gtk_label_new("A GUI application for automatic monitor brightness\ncontrol using DDC/CI");
+    gtk_label_set_justify(GTK_LABEL(desc_label), GTK_JUSTIFY_CENTER);
+    gtk_box_pack_start(GTK_BOX(vbox), desc_label, FALSE, FALSE, 5);
+
+    /* Separator */
+    GtkWidget *separator1 = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
+    gtk_box_pack_start(GTK_BOX(vbox), separator1, FALSE, FALSE, 5);
+
+    /* Build date */
+    GtkWidget *date_title = gtk_label_new(NULL);
+    gtk_label_set_markup(GTK_LABEL(date_title), "<b>Build Date</b>");
+    gtk_box_pack_start(GTK_BOX(vbox), date_title, FALSE, FALSE, 0);
+
+    GtkWidget *date_value = gtk_label_new(build_date);
+    gtk_box_pack_start(GTK_BOX(vbox), date_value, FALSE, FALSE, 5);
+
+    /* Author */
+    GtkWidget *author_title = gtk_label_new(NULL);
+    gtk_label_set_markup(GTK_LABEL(author_title), "<b>Author</b>");
+    gtk_box_pack_start(GTK_BOX(vbox), author_title, FALSE, FALSE, 0);
+
+    GtkWidget *author_value = gtk_label_new(APP_AUTHOR);
+    gtk_box_pack_start(GTK_BOX(vbox), author_value, FALSE, FALSE, 5);
+
+    /* Repository link */
+    GtkWidget *repo_title = gtk_label_new(NULL);
+    gtk_label_set_markup(GTK_LABEL(repo_title), "<b>Repository</b>");
+    gtk_box_pack_start(GTK_BOX(vbox), repo_title, FALSE, FALSE, 0);
+
+    GtkWidget *repo_value = gtk_label_new(NULL);
+    gtk_label_set_markup(GTK_LABEL(repo_value), "<a href=\"https://github.com/wranvaud/ddc-automatic-brightness\">https://github.com/wranvaud/ddc-automatic-brightness</a>");
+    gtk_label_set_line_wrap(GTK_LABEL(repo_value), TRUE);
+    gtk_label_set_selectable(GTK_LABEL(repo_value), TRUE);
+    gtk_box_pack_start(GTK_BOX(vbox), repo_value, FALSE, FALSE, 5);
+
+    /* Separator */
+    GtkWidget *separator2 = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
+    gtk_box_pack_start(GTK_BOX(vbox), separator2, FALSE, FALSE, 5);
+
+    /* License */
+    GtkWidget *license_title = gtk_label_new(NULL);
+    gtk_label_set_markup(GTK_LABEL(license_title), "<b>License</b>");
+    gtk_box_pack_start(GTK_BOX(vbox), license_title, FALSE, FALSE, 0);
+
+    GtkWidget *license_value = gtk_label_new("GNU General Public License v2.0");
+    gtk_box_pack_start(GTK_BOX(vbox), license_value, FALSE, FALSE, 15);
+
+    gtk_widget_show_all(content_area);
+    gtk_dialog_run(GTK_DIALOG(about_dialog));
+    gtk_widget_destroy(about_dialog);
 }
 
 /* Brightness transition timer callback - handles gradual brightness changes */
@@ -648,9 +760,7 @@ static gboolean auto_brightness_timer_callback(gpointer data)
             } else if (mode == AUTO_BRIGHTNESS_MODE_LIGHT_SENSOR) {
                 /* Apply light sensor-based brightness with hysteresis */
                 if (light_sensor_is_available(app_data.light_sensor)) {
-                    /* Load the curve for this monitor */
-                    load_light_sensor_curve_for_monitor(monitor_get_device_path(monitor), "auto brightness timer");
-
+                    /* Use the already-loaded curve for this monitor (loaded when monitor was selected) */
                     double lux = light_sensor_read_lux(app_data.light_sensor);
                     if (lux >= 0) {
                         /* Get the last stable lux value used for this monitor */
@@ -674,8 +784,8 @@ static gboolean auto_brightness_timer_callback(gpointer data)
                             monitor_set_stable_lux(monitor, lux);
 
                             if (monitor == app_data.current_monitor) {
-                                g_message("Light sensor: %.1f lux -> %d%% brightness (was %.1f lux)",
-                                         lux, target_brightness, stable_lux);
+                                g_debug("Light sensor: %.1f lux -> %d%% brightness (was %.1f lux)",
+                                        lux, target_brightness, stable_lux);
                             }
                         } else {
                             /* Within hysteresis zone, keep current brightness target */
@@ -704,8 +814,8 @@ static gboolean auto_brightness_timer_callback(gpointer data)
                         if (target_brightness > 100) target_brightness = 100;
 
                         if (monitor == app_data.current_monitor) {
-                            g_message("Laptop display: %d%% + offset %d%% -> %d%% brightness",
-                                     laptop_brightness, offset, target_brightness);
+                            g_debug("Laptop display: %d%% + offset %d%% -> %d%% brightness",
+                                    laptop_brightness, offset, target_brightness);
                         }
                     }
                 }
@@ -759,18 +869,27 @@ static void setup_ui(void)
     /* Monitor selection frame */
     monitor_frame = gtk_frame_new("Monitor");
     gtk_box_pack_start(GTK_BOX(main_vbox), monitor_frame, FALSE, FALSE, 0);
-    
+
+    vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
+    gtk_container_set_border_width(GTK_CONTAINER(vbox), 10);
+    gtk_container_add(GTK_CONTAINER(monitor_frame), vbox);
+
     hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
-    gtk_container_set_border_width(GTK_CONTAINER(hbox), 10);
-    gtk_container_add(GTK_CONTAINER(monitor_frame), hbox);
-    
+    gtk_box_pack_start(GTK_BOX(vbox), hbox, FALSE, FALSE, 0);
+
     monitor_label = gtk_label_new("Monitor:");
     gtk_box_pack_start(GTK_BOX(hbox), monitor_label, FALSE, FALSE, 0);
-    
+
     app_data.monitor_combo = gtk_combo_box_text_new();
     gtk_box_pack_start(GTK_BOX(hbox), app_data.monitor_combo, TRUE, TRUE, 0);
-    g_signal_connect(app_data.monitor_combo, "changed", 
+    g_signal_connect(app_data.monitor_combo, "changed",
                      G_CALLBACK(on_monitor_changed), NULL);
+
+    /* Refresh Monitors button inside the Monitor frame */
+    refresh_button = gtk_button_new_with_label("Refresh Monitors");
+    gtk_box_pack_start(GTK_BOX(vbox), refresh_button, FALSE, FALSE, 0);
+    g_signal_connect(refresh_button, "clicked",
+                     G_CALLBACK(on_refresh_monitors_clicked), NULL);
     
     /* Brightness control frame */
     brightness_frame = gtk_frame_new("Brightness Control");
@@ -920,18 +1039,18 @@ static void setup_ui(void)
     button_frame = gtk_frame_new(NULL);
     gtk_frame_set_shadow_type(GTK_FRAME(button_frame), GTK_SHADOW_NONE);
     gtk_box_pack_start(GTK_BOX(main_vbox), button_frame, FALSE, FALSE, 0);
-    
+
     hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
     gtk_container_add(GTK_CONTAINER(button_frame), hbox);
-    
-    refresh_button = gtk_button_new_with_label("Refresh Monitors");
-    gtk_box_pack_start(GTK_BOX(hbox), refresh_button, FALSE, FALSE, 0);
-    g_signal_connect(refresh_button, "clicked", 
-                     G_CALLBACK(on_refresh_monitors_clicked), NULL);
-    
+
+    GtkWidget *about_button = gtk_button_new_with_label("About");
+    gtk_box_pack_start(GTK_BOX(hbox), about_button, FALSE, FALSE, 0);
+    g_signal_connect(about_button, "clicked",
+                     G_CALLBACK(on_about_clicked), NULL);
+
     quit_button = gtk_button_new_with_label("Quit");
     gtk_box_pack_end(GTK_BOX(hbox), quit_button, FALSE, FALSE, 0);
-    g_signal_connect(quit_button, "clicked", 
+    g_signal_connect(quit_button, "clicked",
                      G_CALLBACK(on_window_destroy), NULL);
 }
 
@@ -960,8 +1079,8 @@ static void load_monitors(void)
         /* Start retry timer if this is the initial load (retry_attempt == 0) */
         if (app_data.monitor_retry_attempt == 0) {
             app_data.monitor_retry_attempt = 1;
-            app_data.monitor_retry_timer = g_timeout_add_seconds(30, load_monitors_with_retry, NULL);
-            g_message("No monitors found on startup, will retry in 30 seconds...");
+            app_data.monitor_retry_timer = g_timeout_add_seconds(MONITOR_RETRY_INITIAL_SECONDS, load_monitors_with_retry, NULL);
+            g_message("No monitors found on startup, will retry in %d seconds...", MONITOR_RETRY_INITIAL_SECONDS);
         }
         
 #if HAVE_APPINDICATOR
@@ -981,23 +1100,26 @@ static void load_monitors(void)
         app_data.monitor_retry_attempt = 0;
         g_message("Monitors detected successfully!");
     }
-    
+
     /* Populate combo box */
-    const char *default_monitor = config_get_default_monitor(app_data.config);
+    char *default_monitor = config_get_default_monitor(app_data.config);
     int default_index = -1;
-    
+
     for (int i = 0; i < monitor_list_get_count(app_data.monitors); i++) {
         Monitor *monitor = monitor_list_get_monitor(app_data.monitors, i);
         const char *display_name = monitor_get_display_name(monitor);
         const char *device_path = monitor_get_device_path(monitor);
-        
+
         gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(app_data.monitor_combo), display_name);
-        
+
         if (default_monitor && strcmp(device_path, default_monitor) == 0) {
             default_index = i;
         }
     }
-    
+
+    /* Free the allocated default monitor string */
+    g_free(default_monitor);
+
     /* Select default monitor */
     if (default_index >= 0) {
         gtk_combo_box_set_active(GTK_COMBO_BOX(app_data.monitor_combo), default_index);
@@ -1076,23 +1198,26 @@ static gboolean load_monitors_with_retry(gpointer data)
     app_data.monitors_found = TRUE;
     app_data.monitor_retry_attempt = 0;
     g_message("Monitors detected successfully on retry!");
-    
+
     /* Populate combo box */
-    const char *default_monitor = config_get_default_monitor(app_data.config);
+    char *default_monitor = config_get_default_monitor(app_data.config);
     int default_index = -1;
-    
+
     for (int i = 0; i < monitor_list_get_count(app_data.monitors); i++) {
         Monitor *monitor = monitor_list_get_monitor(app_data.monitors, i);
         const char *display_name = monitor_get_display_name(monitor);
         const char *device_path = monitor_get_device_path(monitor);
-        
+
         gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(app_data.monitor_combo), display_name);
-        
+
         if (default_monitor && strcmp(device_path, default_monitor) == 0) {
             default_index = i;
         }
     }
-    
+
+    /* Free the allocated default monitor string */
+    g_free(default_monitor);
+
     /* Select default monitor */
     if (default_index >= 0) {
         gtk_combo_box_set_active(GTK_COMBO_BOX(app_data.monitor_combo), default_index);
@@ -1112,7 +1237,10 @@ static gboolean load_monitors_with_retry(gpointer data)
 static gboolean recheck_monitors_immediately(gpointer data)
 {
     (void)data;
-    
+
+    /* Clear the timer ID since we're executing now */
+    app_data.recheck_timer_id = 0;
+
     g_message("Re-checking monitor availability immediately");
     
     /* Save current state to compare after re-detection */
@@ -1154,7 +1282,7 @@ static gboolean auto_refresh_monitors_on_failure(void)
     static time_t last_refresh_time = 0;
     time_t current_time = time(NULL);
 
-    if (current_time - last_refresh_time < 1) {
+    if (current_time - last_refresh_time < MONITOR_REFRESH_RATE_LIMIT_SECONDS) {
         g_message("Auto-refresh rate limited (last refresh %.0f seconds ago)",
                   difftime(current_time, last_refresh_time));
         return FALSE;
@@ -1430,19 +1558,18 @@ static void setup_tray_indicator(void)
     app_indicator_set_menu(app_data.indicator, GTK_MENU(app_data.indicator_menu));
 }
 
-/* Indicator brightness callbacks */
-static void on_indicator_brightness_20(GtkMenuItem *item, gpointer data)
+/* Helper function for indicator brightness callbacks */
+static void set_brightness_from_indicator(int brightness)
 {
-    (void)item; (void)data;
     if (app_data.current_monitor) {
         /* Disable auto brightness and save config immediately */
         config_set_monitor_auto_brightness_mode(app_data.config,
                                                 monitor_get_device_path(app_data.current_monitor),
                                                 AUTO_BRIGHTNESS_MODE_DISABLED);
 
-        monitor_set_brightness_with_retry(app_data.current_monitor, 20, auto_refresh_monitors_on_failure);
+        monitor_set_brightness_with_retry(app_data.current_monitor, brightness, auto_refresh_monitors_on_failure);
         app_data.updating_from_auto = TRUE;
-        gtk_range_set_value(GTK_RANGE(app_data.brightness_scale), 20);
+        gtk_range_set_value(GTK_RANGE(app_data.brightness_scale), brightness);
         app_data.updating_from_auto = FALSE;
 
         /* Update UI - this will now reflect the disabled mode in the menu */
@@ -1452,121 +1579,43 @@ static void on_indicator_brightness_20(GtkMenuItem *item, gpointer data)
 
         update_brightness_display();
     }
+}
+
+/* Indicator brightness callbacks */
+static void on_indicator_brightness_20(GtkMenuItem *item, gpointer data)
+{
+    (void)item; (void)data;
+    set_brightness_from_indicator(20);
 }
 
 static void on_indicator_brightness_25(GtkMenuItem *item, gpointer data)
 {
     (void)item; (void)data;
-    if (app_data.current_monitor) {
-        /* Disable auto brightness and save config immediately */
-        config_set_monitor_auto_brightness_mode(app_data.config,
-                                                monitor_get_device_path(app_data.current_monitor),
-                                                AUTO_BRIGHTNESS_MODE_DISABLED);
-
-        monitor_set_brightness_with_retry(app_data.current_monitor, 25, auto_refresh_monitors_on_failure);
-        app_data.updating_from_auto = TRUE;
-        gtk_range_set_value(GTK_RANGE(app_data.brightness_scale), 25);
-        app_data.updating_from_auto = FALSE;
-
-        /* Update UI - this will now reflect the disabled mode in the menu */
-        if (!gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(app_data.auto_brightness_disabled_radio))) {
-            gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app_data.auto_brightness_disabled_radio), TRUE);
-        }
-
-        update_brightness_display();
-    }
+    set_brightness_from_indicator(25);
 }
 
 static void on_indicator_brightness_50(GtkMenuItem *item, gpointer data)
 {
     (void)item; (void)data;
-    if (app_data.current_monitor) {
-        /* Disable auto brightness and save config immediately */
-        config_set_monitor_auto_brightness_mode(app_data.config,
-                                                monitor_get_device_path(app_data.current_monitor),
-                                                AUTO_BRIGHTNESS_MODE_DISABLED);
-
-        monitor_set_brightness_with_retry(app_data.current_monitor, 50, auto_refresh_monitors_on_failure);
-        app_data.updating_from_auto = TRUE;
-        gtk_range_set_value(GTK_RANGE(app_data.brightness_scale), 50);
-        app_data.updating_from_auto = FALSE;
-
-        /* Update UI - this will now reflect the disabled mode in the menu */
-        if (!gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(app_data.auto_brightness_disabled_radio))) {
-            gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app_data.auto_brightness_disabled_radio), TRUE);
-        }
-
-        update_brightness_display();
-    }
+    set_brightness_from_indicator(50);
 }
 
 static void on_indicator_brightness_35(GtkMenuItem *item, gpointer data)
 {
     (void)item; (void)data;
-    if (app_data.current_monitor) {
-        /* Disable auto brightness and save config immediately */
-        config_set_monitor_auto_brightness_mode(app_data.config,
-                                                monitor_get_device_path(app_data.current_monitor),
-                                                AUTO_BRIGHTNESS_MODE_DISABLED);
-
-        monitor_set_brightness_with_retry(app_data.current_monitor, 35, auto_refresh_monitors_on_failure);
-        app_data.updating_from_auto = TRUE;
-        gtk_range_set_value(GTK_RANGE(app_data.brightness_scale), 35);
-        app_data.updating_from_auto = FALSE;
-
-        /* Update UI - this will now reflect the disabled mode in the menu */
-        if (!gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(app_data.auto_brightness_disabled_radio))) {
-            gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app_data.auto_brightness_disabled_radio), TRUE);
-        }
-
-        update_brightness_display();
-    }
+    set_brightness_from_indicator(35);
 }
 
 static void on_indicator_brightness_70(GtkMenuItem *item, gpointer data)
 {
     (void)item; (void)data;
-    if (app_data.current_monitor) {
-        /* Disable auto brightness and save config immediately */
-        config_set_monitor_auto_brightness_mode(app_data.config,
-                                                monitor_get_device_path(app_data.current_monitor),
-                                                AUTO_BRIGHTNESS_MODE_DISABLED);
-
-        monitor_set_brightness_with_retry(app_data.current_monitor, 70, auto_refresh_monitors_on_failure);
-        app_data.updating_from_auto = TRUE;
-        gtk_range_set_value(GTK_RANGE(app_data.brightness_scale), 70);
-        app_data.updating_from_auto = FALSE;
-
-        /* Update UI - this will now reflect the disabled mode in the menu */
-        if (!gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(app_data.auto_brightness_disabled_radio))) {
-            gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app_data.auto_brightness_disabled_radio), TRUE);
-        }
-
-        update_brightness_display();
-    }
+    set_brightness_from_indicator(70);
 }
 
 static void on_indicator_brightness_100(GtkMenuItem *item, gpointer data)
 {
     (void)item; (void)data;
-    if (app_data.current_monitor) {
-        /* Disable auto brightness and save config immediately */
-        config_set_monitor_auto_brightness_mode(app_data.config,
-                                                monitor_get_device_path(app_data.current_monitor),
-                                                AUTO_BRIGHTNESS_MODE_DISABLED);
-
-        monitor_set_brightness_with_retry(app_data.current_monitor, 100, auto_refresh_monitors_on_failure);
-        app_data.updating_from_auto = TRUE;
-        gtk_range_set_value(GTK_RANGE(app_data.brightness_scale), 100);
-        app_data.updating_from_auto = FALSE;
-
-        /* Update UI - this will now reflect the disabled mode in the menu */
-        if (!gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(app_data.auto_brightness_disabled_radio))) {
-            gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app_data.auto_brightness_disabled_radio), TRUE);
-        }
-
-        update_brightness_display();
-    }
+    set_brightness_from_indicator(100);
 }
 
 /* Deferred mode change callback - does the heavy I/O work after UI updates
@@ -1846,7 +1895,7 @@ static void update_indicator_menu(void)
     int main_display_brightness = -1;
 
     if (light_sensor_is_available(app_data.light_sensor) && app_data.current_monitor) {
-        load_light_sensor_curve_for_monitor(monitor_get_device_path(app_data.current_monitor), "tray menu update");
+        /* Use the already-loaded curve for the current monitor */
         double lux = light_sensor_read_lux(app_data.light_sensor);
         if (lux >= 0) {
             sensor_brightness = light_sensor_calculate_brightness(app_data.light_sensor, lux);
@@ -2063,23 +2112,29 @@ static gboolean on_udev_event(GIOChannel *channel, GIOCondition condition, gpoin
                 }
                 
                 if (should_check_monitors) {
-                    /* Cancel any existing retry timer */
+                    /* Debounce udev events: cancel any existing timers to prevent rapid
+                     * plug/unplug sequences from triggering multiple monitor refreshes */
                     if (app_data.monitor_retry_timer > 0) {
                         g_source_remove(app_data.monitor_retry_timer);
                         app_data.monitor_retry_timer = 0;
                     }
-                    
+
                     if (strcmp(action, "add") == 0) {
                         /* Device added - retry detection if we don't have monitors */
+                        /* Debounce: wait to allow multiple rapid events to settle */
                         if (!app_data.monitors_found) {
                             app_data.monitor_retry_attempt = 1;
-                            app_data.monitor_retry_timer = g_timeout_add_seconds(2, load_monitors_with_retry, NULL);
-                            g_message("Hardware added, will retry monitor detection in 2 seconds");
+                            app_data.monitor_retry_timer = g_timeout_add_seconds(UDEV_DEBOUNCE_SECONDS, load_monitors_with_retry, NULL);
+                            g_message("Hardware added, will retry monitor detection in %d seconds", UDEV_DEBOUNCE_SECONDS);
                         }
                     } else if (strcmp(action, "remove") == 0) {
-                        /* Device removed - immediately re-check to see if our monitor was disconnected */
-                        g_timeout_add_seconds(1, recheck_monitors_immediately, NULL);
-                        g_message("Hardware removed, will re-check monitor status in 1 second");
+                        /* Device removed - re-check to see if our monitor was disconnected */
+                        /* Debounce: cancel any existing recheck timer and wait */
+                        if (app_data.recheck_timer_id > 0) {
+                            g_source_remove(app_data.recheck_timer_id);
+                        }
+                        app_data.recheck_timer_id = g_timeout_add_seconds(UDEV_DEBOUNCE_SECONDS, recheck_monitors_immediately, NULL);
+                        g_message("Hardware removed, will re-check monitor status in %d seconds", UDEV_DEBOUNCE_SECONDS);
                     }
                 }
             }

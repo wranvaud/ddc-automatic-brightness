@@ -22,7 +22,7 @@ void monitor_set_internal(Monitor *monitor, gboolean is_internal);
 
 const char* monitor_get_device_path(Monitor *monitor);
 const char* monitor_get_display_name(Monitor *monitor);
-gboolean monitor_is_internal(Monitor *monitor);
+gboolean monitor_is_internal(const Monitor *monitor);
 
 int monitor_get_brightness(Monitor *monitor);
 gboolean monitor_set_brightness(Monitor *monitor, int brightness);

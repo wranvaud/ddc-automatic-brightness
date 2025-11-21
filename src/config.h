@@ -21,7 +21,7 @@ gboolean config_load(AppConfig *config);
 gboolean config_save(AppConfig *config);
 
 /* General settings */
-const char* config_get_default_monitor(AppConfig *config);
+char* config_get_default_monitor(AppConfig *config);  /* Caller must free returned string */
 void config_set_default_monitor(AppConfig *config, const char *device_path);
 
 gboolean config_get_auto_brightness_enabled(AppConfig *config);

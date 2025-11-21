@@ -177,7 +177,6 @@ gboolean light_sensor_read_raw(LightSensor *sensor, int *raw_value, double *scal
         return FALSE;
     }
     fclose(raw_file);
-    g_debug("Read raw value: %d from %s", raw, raw_path);
 
     /* Read scale */
     char scale_path[512];
@@ -214,8 +213,6 @@ gboolean light_sensor_read_raw(LightSensor *sensor, int *raw_value, double *scal
         if (scale) *scale = 1.0;
         return TRUE;
     }
-
-    g_debug("Read scale value: %f from %s", scale_val, scale_path);
 
     if (raw_value) *raw_value = raw;
     if (scale) *scale = scale_val;

@@ -10,6 +10,7 @@
 #include <dirent.h>
 #include <unistd.h>
 #include <limits.h>
+#include <sys/wait.h>
 
 /* Check if an i2c device corresponds to an internal display (eDP or LVDS) */
 static gboolean is_internal_display(const char *device_path)
@@ -225,5 +226,13 @@ MonitorList* monitor_detect_all(void)
 gboolean monitor_detect_ddccontrol_available(void)
 {
     int result = system("which ddccontrol >/dev/null 2>&1");
-    return (result == 0);
+
+    /* Check if fork/exec failed */
+    if (result == -1) {
+        g_warning("Failed to execute 'which' command");
+        return FALSE;
+    }
+
+    /* Check if command executed successfully and exited with status 0 */
+    return (WIFEXITED(result) && WEXITSTATUS(result) == 0);
 }

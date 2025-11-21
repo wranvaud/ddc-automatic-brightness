@@ -64,7 +64,7 @@ const char* monitor_get_display_name(Monitor *monitor)
 }
 
 /* Check if monitor is internal display */
-gboolean monitor_is_internal(Monitor *monitor)
+gboolean monitor_is_internal(const Monitor *monitor)
 {
     return monitor ? monitor->is_internal : FALSE;
 }
@@ -97,31 +97,34 @@ int monitor_get_brightness(Monitor *monitor)
     
     char line[512];
     int brightness = -1;
-    
+
+    /* Compile regex once before the loop for better performance */
+    regex_t regex;
+    regmatch_t matches[3];
+    int regex_compiled = (regcomp(&regex, "Control 0x10: \\+/([0-9]+)/([0-9]+)", REG_EXTENDED) == 0);
+
+    if (!regex_compiled) {
+        g_warning("Failed to compile regex for brightness parsing");
+        pclose(fp);
+        return -1;
+    }
+
     while (fgets(line, sizeof(line), fp)) {
         /* Parse output: "Control 0x10: +/current/max [...]" */
-        regex_t regex;
-        regmatch_t matches[3];
-        
-        if (regcomp(&regex, "Control 0x10: \\+/([0-9]+)/([0-9]+)", REG_EXTENDED) == 0) {
-            if (regexec(&regex, line, 3, matches, 0) == 0) {
-                /* Extract current value */
-                char current_str[16];
-                int len = matches[1].rm_eo - matches[1].rm_so;
-                if (len < sizeof(current_str)) {
-                    strncpy(current_str, line + matches[1].rm_so, len);
-                    current_str[len] = '\0';
-                    brightness = atoi(current_str);
-                }
+        if (regexec(&regex, line, 3, matches, 0) == 0) {
+            /* Extract current value */
+            char current_str[16];
+            int len = matches[1].rm_eo - matches[1].rm_so;
+            if (len < sizeof(current_str)) {
+                strncpy(current_str, line + matches[1].rm_so, len);
+                current_str[len] = '\0';
+                brightness = atoi(current_str);
+                break;  /* Found match, exit loop */
             }
-            regfree(&regex);
-        }
-        
-        if (brightness >= 0) {
-            break;
         }
     }
-    
+
+    regfree(&regex);
     pclose(fp);
     
     if (brightness < 0) {
