@@ -237,12 +237,12 @@ int main(int argc, char *argv[])
 #endif
     
     /* Start timer for menu updates and auto brightness (runs always) */
-    app_data.auto_brightness_timer = g_timeout_add_seconds(60,
+    app_data.auto_brightness_timer = g_timeout_add_seconds(5,
                                                           auto_brightness_timer_callback,
                                                           &app_data);
 
-    /* Start timer for gradual brightness transitions (runs every 0.5 seconds for smooth 1% steps) */
-    app_data.brightness_transition_timer = g_timeout_add(500,  /* 500 milliseconds = 0.5 seconds */
+    /* Start timer for gradual brightness transitions (runs every 0.2 seconds for smooth 1% steps) */
+    app_data.brightness_transition_timer = g_timeout_add(200,  /* 200 milliseconds = 0.2 seconds */
                                                          brightness_transition_timer_callback,
                                                          &app_data);
 
