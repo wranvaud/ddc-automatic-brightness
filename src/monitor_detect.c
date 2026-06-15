@@ -152,6 +152,8 @@ MonitorList* monitor_detect_all(void)
 
                 Monitor *monitor = monitor_new(current_device, display_name);
                 monitor_set_internal(monitor, is_internal);
+                if (strlen(current_name) > 0)
+                    monitor_set_model_name(monitor, current_name);
 
                 monitor_list_add(list, monitor);
                 g_message("Found monitor: %s (%s)", current_device, type_label);
@@ -201,6 +203,8 @@ MonitorList* monitor_detect_all(void)
 
         Monitor *monitor = monitor_new(current_device, display_name);
         monitor_set_internal(monitor, is_internal);
+        if (strlen(current_name) > 0)
+            monitor_set_model_name(monitor, current_name);
 
         monitor_list_add(list, monitor);
         g_message("Found monitor: %s (%s)", current_device, type_label);

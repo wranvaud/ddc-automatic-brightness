@@ -14,6 +14,7 @@
 struct _Monitor {
     char *device_path;
     char *display_name;
+    char *model_name;         /* Raw model name from ddccontrol (e.g. "Samsung standard LCD") */
     gboolean available;
     gboolean is_internal;
     int current_brightness;  /* Last brightness value actually sent to monitor (-1 = unknown) */
@@ -32,6 +33,7 @@ Monitor* monitor_new(const char *device_path, const char *name)
     Monitor *monitor = g_new0(Monitor, 1);
     monitor->device_path = g_strdup(device_path);
     monitor->display_name = g_strdup(name ? name : device_path);
+    monitor->model_name = NULL;
     monitor->available = TRUE;
     monitor->is_internal = FALSE;  /* Will be set during detection */
     monitor->current_brightness = -1;  /* Unknown initial brightness */
@@ -47,6 +49,7 @@ void monitor_free(Monitor *monitor)
     if (monitor) {
         g_free(monitor->device_path);
         g_free(monitor->display_name);
+        g_free(monitor->model_name);
         g_free(monitor);
     }
 }
@@ -61,6 +64,20 @@ const char* monitor_get_device_path(Monitor *monitor)
 const char* monitor_get_display_name(Monitor *monitor)
 {
     return monitor ? monitor->display_name : NULL;
+}
+
+/* Get raw model name (e.g. "Samsung standard LCD") */
+const char* monitor_get_model_name(Monitor *monitor)
+{
+    return monitor ? monitor->model_name : NULL;
+}
+
+/* Set raw model name */
+void monitor_set_model_name(Monitor *monitor, const char *model_name)
+{
+    if (!monitor) return;
+    g_free(monitor->model_name);
+    monitor->model_name = model_name ? g_strdup(model_name) : NULL;
 }
 
 /* Check if monitor is internal display */

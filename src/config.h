@@ -46,6 +46,10 @@ void config_set_monitor_auto_brightness_mode(AppConfig *config, const char *devi
 int config_get_monitor_brightness_offset(AppConfig *config, const char *device_path);
 void config_set_monitor_brightness_offset(AppConfig *config, const char *device_path, int offset);
 
+/* Per-monitor model name (used for curve migration when I2C bus numbers change) */
+char* config_get_monitor_model_name(AppConfig *config, const char *device_path);  /* Caller must free */
+void config_set_monitor_model_name(AppConfig *config, const char *device_path, const char *model_name);
+
 /* Light sensor curve settings - per monitor */
 typedef struct {
     double lux;
@@ -60,6 +64,9 @@ void config_save_light_sensor_curve(AppConfig *config, const char *device_path,
 /* Light sensor hysteresis setting - per monitor */
 double config_get_light_sensor_hysteresis(AppConfig *config, const char *device_path);
 void config_set_light_sensor_hysteresis(AppConfig *config, const char *device_path, double hysteresis);
+
+/* Maintenance */
+int config_prune_stale_monitors(AppConfig *config);
 
 /* Schedule settings */
 GKeyFile* config_get_keyfile(AppConfig *config);

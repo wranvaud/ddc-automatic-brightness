@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <sys/stat.h>
 #include <errno.h>
 
@@ -445,6 +446,38 @@ void config_set_monitor_brightness_offset(AppConfig *config, const char *device_
     config->modified = TRUE;
 }
 
+/* Get the stored model name for a monitor bus path.
+ * Stored inside the LightSensorCurve_ group so it persists even when [Monitors]
+ * keys for that bus are pruned (e.g. when the monitor is absent at startup).
+ * Caller must g_free the returned string. */
+char* config_get_monitor_model_name(AppConfig *config, const char *device_path)
+{
+    if (!config || !device_path) return NULL;
+
+    char *group = g_strdup_printf("LightSensorCurve_%s", device_path);
+    GError *error = NULL;
+    char *value = g_key_file_get_string(config->keyfile, group, "model_name", &error);
+    g_free(group);
+
+    if (error) {
+        g_error_free(error);
+        return NULL;
+    }
+    return value;
+}
+
+/* Store the model name for a monitor bus path inside the LightSensorCurve_ group
+ * so the association survives across reconnects and pruning cycles. */
+void config_set_monitor_model_name(AppConfig *config, const char *device_path, const char *model_name)
+{
+    if (!config || !device_path || !model_name) return;
+
+    char *group = g_strdup_printf("LightSensorCurve_%s", device_path);
+    g_key_file_set_string(config->keyfile, group, "model_name", model_name);
+    g_free(group);
+    config->modified = TRUE;
+}
+
 /* Load light sensor curve for a specific monitor */
 gboolean config_load_light_sensor_curve(AppConfig *config, const char *device_path,
                                         LightSensorCurvePoint **points, int *count)
@@ -597,4 +630,104 @@ void config_set_light_sensor_hysteresis(AppConfig *config, const char *device_pa
 GKeyFile* config_get_keyfile(AppConfig *config)
 {
     return config ? config->keyfile : NULL;
+}
+
+/* Extract the /dev/i2c-N prefix from a [Monitors] key such as "/dev/i2c-13_auto_brightness".
+ * Returns a newly-allocated string, or NULL if the key doesn't match the expected format.
+ * Caller must g_free() the result. */
+static char* extract_device_path_from_key(const char *key)
+{
+    if (!key || !g_str_has_prefix(key, "/dev/i2c-")) {
+        return NULL;
+    }
+
+    /* Advance past the bus number digits */
+    const char *p = key + strlen("/dev/i2c-");
+    while (*p && g_ascii_isdigit(*p)) {
+        p++;
+    }
+
+    /* Require at least one digit followed immediately by '_' */
+    if (p == key + strlen("/dev/i2c-") || *p != '_') {
+        return NULL;
+    }
+
+    return g_strndup(key, (gsize)(p - key));
+}
+
+/* Remove config entries for every monitor device path that no longer exists in /dev/.
+ * Called at startup so stale entries from old hub port assignments are cleaned automatically.
+ * Returns the number of stale monitor device paths removed. */
+int config_prune_stale_monitors(AppConfig *config)
+{
+    if (!config) return 0;
+
+    GError *error = NULL;
+    gsize n_keys = 0;
+    char **keys = g_key_file_get_keys(config->keyfile, CONFIG_GROUP_MONITORS, &n_keys, &error);
+    if (error || !keys) {
+        g_clear_error(&error);
+        return 0;
+    }
+
+    /* Collect unique device paths referenced in [Monitors] */
+    GHashTable *device_paths = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    for (gsize i = 0; i < n_keys; i++) {
+        char *path = extract_device_path_from_key(keys[i]);
+        if (path) {
+            if (!g_hash_table_contains(device_paths, path)) {
+                g_hash_table_insert(device_paths, path, GINT_TO_POINTER(1));
+            } else {
+                g_free(path);
+            }
+        }
+    }
+
+    /* Build list of stale paths: device file is absent from /dev/ */
+    GList *stale = NULL;
+    GHashTableIter iter;
+    gpointer key_ptr;
+    g_hash_table_iter_init(&iter, device_paths);
+    while (g_hash_table_iter_next(&iter, &key_ptr, NULL)) {
+        if (access((const char *)key_ptr, F_OK) != 0) {
+            stale = g_list_prepend(stale, key_ptr);  /* borrows pointer; owned by device_paths */
+        }
+    }
+
+    int removed = 0;
+
+    for (GList *l = stale; l; l = l->next) {
+        const char *stale_path = (const char *)l->data;
+        g_message("Pruning stale monitor config: %s (device not found in /dev/)", stale_path);
+
+        /* Remove all [Monitors] keys that belong to this device */
+        for (gsize i = 0; i < n_keys; i++) {
+            char *path = extract_device_path_from_key(keys[i]);
+            if (path && strcmp(path, stale_path) == 0) {
+                g_key_file_remove_key(config->keyfile, CONFIG_GROUP_MONITORS, keys[i], NULL);
+            }
+            g_free(path);
+        }
+
+        removed++;
+    }
+
+    /* If default_monitor points to a stale device, clear it */
+    if (removed > 0) {
+        char *default_monitor = config_get_default_monitor(config);
+        if (default_monitor) {
+            if (access(default_monitor, F_OK) != 0) {
+                g_key_file_remove_key(config->keyfile, CONFIG_GROUP_GENERAL, "default_monitor", NULL);
+                g_message("Cleared stale default_monitor: %s", default_monitor);
+            }
+            g_free(default_monitor);
+        }
+        config->modified = TRUE;
+    }
+
+    g_list_free(stale);
+    g_hash_table_destroy(device_paths);
+    g_strfreev(keys);
+
+    return removed;
 }

@@ -38,6 +38,7 @@
 #include "light_sensor.h"
 #include "laptop_backlight.h"
 #include "light_sensor_dialog.h"
+#include "power_management.h"
 
 /* Application version information */
 #define APP_VERSION "1.1.1"
@@ -49,7 +50,9 @@
 #define BRIGHTNESS_TRANSITION_INTERVAL_MS 200
 #define MONITOR_RETRY_INITIAL_SECONDS 30
 #define MONITOR_REFRESH_RATE_LIMIT_SECONDS 1
-#define UDEV_DEBOUNCE_SECONDS 2
+#define UDEV_DEBOUNCE_ADD_SECONDS 5      /* Longer delay for device addition to allow DDC/CI to stabilize */
+#define UDEV_DEBOUNCE_REMOVE_SECONDS 2   /* Shorter delay for device removal */
+#define DDC_COOLDOWN_SECONDS 60          /* Pause all DDC after repeated failures to let DP link recover */
 
 /* Global application state */
 typedef struct {
@@ -94,6 +97,9 @@ typedef struct {
     guint recheck_timer_id;
     int monitor_retry_attempt;
     gboolean monitors_found;
+
+    /* DDC error cooldown: timestamp until which all DDC commands are paused */
+    time_t ddc_cooldown_until;
     
     /* Udev monitoring for hardware changes */
 #if HAVE_LIBUDEV
@@ -102,6 +108,9 @@ typedef struct {
     GIOChannel *udev_io_channel;
     guint udev_watch_id;
 #endif
+    
+    /* Power management for suspend/resume handling */
+    PowerManager *power_manager;
     
 #if HAVE_APPINDICATOR
     AppIndicator *indicator;
@@ -131,6 +140,8 @@ static gboolean setup_laptop_backlight_monitoring(void);
 static void cleanup_laptop_backlight_monitoring(void);
 static gboolean on_laptop_backlight_change(GIOChannel *channel, GIOCondition condition, gpointer data);
 static void setup_ui(void);
+static gboolean monitor_is_controllable(Monitor *monitor);
+static MonitorList* filter_controllable_monitors(MonitorList *all_monitors);
 static void load_monitors(void);
 static gboolean load_monitors_with_retry(gpointer data);
 static gboolean recheck_monitors_immediately(gpointer data);
@@ -142,6 +153,8 @@ static gboolean setup_udev_monitoring(void);
 static void cleanup_udev_monitoring(void);
 static gboolean on_udev_event(GIOChannel *channel, GIOCondition condition, gpointer data);
 #endif
+static void on_suspend_prepare(gpointer data);
+static void on_resume_complete(gpointer data);
 
 /* Deferred mode change callback declaration (used by both windowed and tray modes) */
 static gboolean deferred_mode_change_callback(gpointer user_data);
@@ -196,7 +209,12 @@ int main(int argc, char *argv[])
     if (!config_load(app_data.config)) {
         g_warning("Failed to load configuration, using defaults");
     }
-    
+
+    int pruned = config_prune_stale_monitors(app_data.config);
+    if (pruned > 0) {
+        g_message("Pruned %d stale monitor(s) from configuration", pruned);
+    }
+
     app_data.scheduler = scheduler_new();
     if (!scheduler_load_from_config(app_data.scheduler, app_data.config)) {
         /* Load default schedule */
@@ -218,6 +236,18 @@ int main(int argc, char *argv[])
     app_data.laptop_backlight = laptop_backlight_new();
     if (laptop_backlight_is_available(app_data.laptop_backlight)) {
         g_message("Laptop backlight available for automatic brightness control");
+    }
+    
+    /* Initialize power manager for suspend/resume handling */
+    app_data.power_manager = power_manager_new();
+    power_manager_set_callbacks(app_data.power_manager,
+                                 on_suspend_prepare,
+                                 on_resume_complete,
+                                 NULL);
+    if (power_manager_setup_monitoring(app_data.power_manager)) {
+        g_message("Suspend/resume monitoring enabled");
+    } else {
+        g_message("Suspend/resume monitoring not available");
     }
     
     /* Check configuration for start minimized */
@@ -306,6 +336,11 @@ int main(int argc, char *argv[])
 
     if (app_data.laptop_backlight) {
         laptop_backlight_free(app_data.laptop_backlight);
+    }
+
+    /* Cleanup power manager */
+    if (app_data.power_manager) {
+        power_manager_free(app_data.power_manager);
     }
 
     if (app_data.config) {
@@ -687,6 +722,17 @@ static gboolean brightness_transition_timer_callback(gpointer data)
 {
     (void)data;  /* Unused parameter */
 
+    /* Skip all DDC commands while screen is blanked, suspended, or in cooldown */
+    if (app_data.power_manager &&
+        (power_manager_is_screen_blanked(app_data.power_manager) ||
+         power_manager_is_system_suspended(app_data.power_manager))) {
+        return TRUE;
+    }
+
+    if (time(NULL) < app_data.ddc_cooldown_until) {
+        return TRUE;
+    }
+
     /* Process each monitor's transition */
     if (app_data.monitors) {
         for (int i = 0; i < monitor_list_get_count(app_data.monitors); i++) {
@@ -741,11 +787,32 @@ static gboolean brightness_transition_timer_callback(gpointer data)
 /* Auto brightness timer callback */
 static gboolean auto_brightness_timer_callback(gpointer data)
 {
+    static gboolean previously_blanked = FALSE;
+
     if (!app_data.current_monitor) {
-        return TRUE; /* Continue timer */
+        return TRUE;
+    }
+
+    /* Don't touch DDC while the screen is blanked or system is suspended */
+    if (app_data.power_manager &&
+        (power_manager_is_screen_blanked(app_data.power_manager) ||
+         power_manager_is_system_suspended(app_data.power_manager))) {
+        previously_blanked = TRUE;
+        return TRUE;
+    }
+
+    /* First tick after screen unblanks: reset stable_lux on all monitors so the
+     * light-sensor mode recalculates and pushes the correct brightness immediately. */
+    if (previously_blanked && app_data.monitors) {
+        g_message("Screen unblanked — resetting brightness state for all monitors");
+        for (int i = 0; i < monitor_list_get_count(app_data.monitors); i++) {
+            monitor_set_stable_lux(monitor_list_get_monitor(app_data.monitors, i), -1.0);
+        }
+        previously_blanked = FALSE;
     }
 
     /* Process each monitor based on its auto brightness mode */
+    /* Note: app_data.monitors only contains controllable monitors (filtered during detection) */
     if (app_data.monitors) {
         for (int i = 0; i < monitor_list_get_count(app_data.monitors); i++) {
             Monitor *monitor = monitor_list_get_monitor(app_data.monitors, i);
@@ -1054,6 +1121,138 @@ static void setup_ui(void)
                      G_CALLBACK(on_window_destroy), NULL);
 }
 
+/* Check if a monitor is controllable (external and DDC/CI works) */
+static gboolean monitor_is_controllable(Monitor *monitor)
+{
+    if (!monitor) {
+        return FALSE;
+    }
+
+    /* Internal monitors are not controllable via DDC/CI */
+    if (monitor_is_internal(monitor)) {
+        g_debug("Monitor %s is internal, not controllable", monitor_get_display_name(monitor));
+        return FALSE;
+    }
+
+    /* Test if DDC/CI communication works by trying to read brightness */
+    int brightness = monitor_get_brightness(monitor);
+    if (brightness < 0) {
+        g_debug("Monitor %s DDC/CI read failed, not controllable", monitor_get_display_name(monitor));
+        return FALSE;
+    }
+
+    g_message("Monitor %s is controllable (brightness: %d%%)", monitor_get_display_name(monitor), brightness);
+    return TRUE;
+}
+
+/* Filter monitor list to only include controllable monitors */
+static MonitorList* filter_controllable_monitors(MonitorList *all_monitors)
+{
+    if (!all_monitors) {
+        return NULL;
+    }
+
+    MonitorList *filtered = monitor_list_new();
+    int total_count = monitor_list_get_count(all_monitors);
+    int controllable_count = 0;
+
+    g_message("Filtering %d detected monitors for controllability...", total_count);
+
+    for (int i = 0; i < total_count; i++) {
+        Monitor *monitor = monitor_list_get_monitor(all_monitors, i);
+
+        if (monitor_is_controllable(monitor)) {
+            /* Create a new monitor instance with the same data */
+            Monitor *filtered_monitor = monitor_new(
+                monitor_get_device_path(monitor),
+                monitor_get_display_name(monitor)
+            );
+            monitor_set_internal(filtered_monitor, monitor_is_internal(monitor));
+            monitor_set_available(filtered_monitor, monitor_is_available(monitor));
+            if (monitor_get_model_name(monitor))
+                monitor_set_model_name(filtered_monitor, monitor_get_model_name(monitor));
+
+            monitor_list_add(filtered, filtered_monitor);
+            controllable_count++;
+        } else {
+            g_message("Excluding non-controllable monitor: %s", monitor_get_display_name(monitor));
+        }
+    }
+
+    g_message("Found %d controllable monitors out of %d total", controllable_count, total_count);
+    return filtered;
+}
+
+/* For each external monitor that has no light sensor curve on its current I2C bus,
+ * search for a curve stored under a different bus that was previously used by the
+ * same monitor model and copy it across.  This handles the case where a hub
+ * reconnect causes the kernel to assign a new /dev/i2c-N number. */
+static void migrate_monitor_curves(void)
+{
+    if (!app_data.monitors || !app_data.config) return;
+
+    GKeyFile *keyfile = config_get_keyfile(app_data.config);
+    int count = monitor_list_get_count(app_data.monitors);
+
+    for (int i = 0; i < count; i++) {
+        Monitor *monitor = monitor_list_get_monitor(app_data.monitors, i);
+        if (monitor_is_internal(monitor)) continue;
+
+        const char *device_path = monitor_get_device_path(monitor);
+        const char *model_name  = monitor_get_model_name(monitor);
+        if (!model_name || model_name[0] == '\0') continue;
+
+        /* Always record the model name for the current bus so future calls can find it */
+        config_set_monitor_model_name(app_data.config, device_path, model_name);
+
+        /* If this bus already has a curve, nothing to do */
+        LightSensorCurvePoint *existing = NULL;
+        int existing_count = 0;
+        if (config_load_light_sensor_curve(app_data.config, device_path, &existing, &existing_count)) {
+            g_free(existing);
+            continue;
+        }
+
+        /* Search all LightSensorCurve_* groups for a matching model name on another bus */
+        gsize n_groups = 0;
+        char **groups = g_key_file_get_groups(keyfile, &n_groups);
+        if (!groups) continue;
+
+        for (gsize g = 0; g < n_groups; g++) {
+            if (!g_str_has_prefix(groups[g], "LightSensorCurve_")) continue;
+
+            const char *old_path = groups[g] + strlen("LightSensorCurve_");
+            if (strcmp(old_path, device_path) == 0) continue;
+
+            /* Only migrate from buses whose device is no longer present */
+            if (access(old_path, F_OK) == 0) continue;
+
+            char *old_model = config_get_monitor_model_name(app_data.config, old_path);
+            if (!old_model) continue;
+
+            gboolean match = (strcmp(old_model, model_name) == 0);
+            g_free(old_model);
+            if (!match) continue;
+
+            LightSensorCurvePoint *old_points = NULL;
+            int old_count = 0;
+            if (!config_load_light_sensor_curve(app_data.config, old_path, &old_points, &old_count))
+                continue;
+
+            double hysteresis = config_get_light_sensor_hysteresis(app_data.config, old_path);
+            config_save_light_sensor_curve(app_data.config, device_path, old_points, old_count);
+            config_set_light_sensor_hysteresis(app_data.config, device_path, hysteresis);
+            g_free(old_points);
+
+            g_message("Migrated light sensor curve from %s to %s (model: %s)",
+                      old_path, device_path, model_name);
+            break;
+        }
+
+        g_strfreev(groups);
+    }
+}
+
 /* Load available monitors */
 static void load_monitors(void)
 {
@@ -1063,45 +1262,71 @@ static void load_monitors(void)
         app_data.monitors = NULL;
         app_data.current_monitor = NULL;
     }
-    
+
     /* Clear combo box */
     GtkTreeModel *model = gtk_combo_box_get_model(GTK_COMBO_BOX(app_data.monitor_combo));
     if (model) {
         gtk_list_store_clear(GTK_LIST_STORE(model));
     }
-    
-    /* Detect monitors */
-    app_data.monitors = monitor_detect_all();
-    
-    if (!app_data.monitors || monitor_list_get_count(app_data.monitors) == 0) {
+
+    /* Detect all monitors */
+    MonitorList *all_monitors = monitor_detect_all();
+
+    if (!all_monitors || monitor_list_get_count(all_monitors) == 0) {
+        g_message("No monitors detected");
         app_data.monitors_found = FALSE;
-        
+
         /* Start retry timer if this is the initial load (retry_attempt == 0) */
         if (app_data.monitor_retry_attempt == 0) {
             app_data.monitor_retry_attempt = 1;
             app_data.monitor_retry_timer = g_timeout_add_seconds(MONITOR_RETRY_INITIAL_SECONDS, load_monitors_with_retry, NULL);
             g_message("No monitors found on startup, will retry in %d seconds...", MONITOR_RETRY_INITIAL_SECONDS);
         }
-        
+
 #if HAVE_APPINDICATOR
         /* Update tray icon to reflect no monitors state */
         update_tray_icon_label();
 #endif
         return;
     }
-    
-    /* Monitors found! */
+
+    /* Filter to only controllable monitors */
+    app_data.monitors = filter_controllable_monitors(all_monitors);
+    monitor_list_free(all_monitors);  /* Free the unfiltered list */
+
+    if (!app_data.monitors || monitor_list_get_count(app_data.monitors) == 0) {
+        g_message("No controllable monitors found");
+        app_data.monitors_found = FALSE;
+
+        /* Start retry timer if this is the initial load */
+        if (app_data.monitor_retry_attempt == 0) {
+            app_data.monitor_retry_attempt = 1;
+            app_data.monitor_retry_timer = g_timeout_add_seconds(MONITOR_RETRY_INITIAL_SECONDS, load_monitors_with_retry, NULL);
+            g_message("No controllable monitors found on startup, will retry in %d seconds...", MONITOR_RETRY_INITIAL_SECONDS);
+        }
+
+#if HAVE_APPINDICATOR
+        /* Update tray icon to reflect no monitors state */
+        update_tray_icon_label();
+#endif
+        return;
+    }
+
+    /* Controllable monitors found! */
     app_data.monitors_found = TRUE;
-    
+
+    /* Migrate any light sensor curves that moved to a new I2C bus */
+    migrate_monitor_curves();
+
     /* Cancel any pending retry timer */
     if (app_data.monitor_retry_timer > 0) {
         g_source_remove(app_data.monitor_retry_timer);
         app_data.monitor_retry_timer = 0;
         app_data.monitor_retry_attempt = 0;
-        g_message("Monitors detected successfully!");
+        g_message("Controllable monitors detected successfully!");
     }
 
-    /* Populate combo box */
+    /* Populate combo box with controllable monitors only */
     char *default_monitor = config_get_default_monitor(app_data.config);
     int default_index = -1;
 
@@ -1112,21 +1337,23 @@ static void load_monitors(void)
 
         gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(app_data.monitor_combo), display_name);
 
+        /* Check if this is the previously selected monitor */
         if (default_monitor && strcmp(device_path, default_monitor) == 0) {
             default_index = i;
         }
     }
 
-    /* Free the allocated default monitor string */
     g_free(default_monitor);
 
-    /* Select default monitor */
+    /* Select monitor: restore previous selection or select first */
     if (default_index >= 0) {
+        g_message("Restoring previously selected monitor at index %d", default_index);
         gtk_combo_box_set_active(GTK_COMBO_BOX(app_data.monitor_combo), default_index);
     } else {
+        g_message("No previous selection, selecting first monitor");
         gtk_combo_box_set_active(GTK_COMBO_BOX(app_data.monitor_combo), 0);
     }
-    
+
 #if HAVE_APPINDICATOR
     /* Update tray icon to reflect monitors found */
     update_tray_icon_label();
@@ -1137,37 +1364,37 @@ static void load_monitors(void)
 static gboolean load_monitors_with_retry(gpointer data)
 {
     (void)data;
-    
+
     /* Clear the timer ID since it's about to complete */
     app_data.monitor_retry_timer = 0;
-    
+
     /* Try to detect monitors again */
     g_message("Retrying monitor detection (attempt %d)...", app_data.monitor_retry_attempt);
-    
+
     /* Temporarily increase retry attempt to avoid triggering another retry from load_monitors */
     int saved_attempt = app_data.monitor_retry_attempt;
     app_data.monitor_retry_attempt = -1;  /* Special value to indicate retry in progress */
-    
+
     /* Clear existing monitors */
     if (app_data.monitors) {
         monitor_list_free(app_data.monitors);
         app_data.monitors = NULL;
         app_data.current_monitor = NULL;
     }
-    
+
     /* Clear combo box */
     GtkTreeModel *model = gtk_combo_box_get_model(GTK_COMBO_BOX(app_data.monitor_combo));
     if (model) {
         gtk_list_store_clear(GTK_LIST_STORE(model));
     }
-    
-    /* Detect monitors */
-    app_data.monitors = monitor_detect_all();
-    
-    if (!app_data.monitors || monitor_list_get_count(app_data.monitors) == 0) {
+
+    /* Detect all monitors */
+    MonitorList *all_monitors = monitor_detect_all();
+
+    if (!all_monitors || monitor_list_get_count(all_monitors) == 0) {
         /* Restore attempt counter */
         app_data.monitor_retry_attempt = saved_attempt;
-        
+
         /* Schedule next retry based on attempt number */
         if (app_data.monitor_retry_attempt == 1) {
             /* Second attempt: retry after 90 seconds from startup (60 more seconds) */
@@ -1184,22 +1411,56 @@ static gboolean load_monitors_with_retry(gpointer data)
             app_data.monitor_retry_attempt = 0;
             app_data.monitors_found = FALSE;
             g_message("All monitor detection attempts failed");
-            
+
 #if HAVE_APPINDICATOR
             /* Update tray icon to reflect no monitors state */
             update_tray_icon_label();
 #endif
         }
-        
+
         return FALSE; /* Stop the current timer */
     }
-    
-    /* Monitors found! */
+
+    /* Filter to only controllable monitors */
+    app_data.monitors = filter_controllable_monitors(all_monitors);
+    monitor_list_free(all_monitors);  /* Free the unfiltered list */
+
+    if (!app_data.monitors || monitor_list_get_count(app_data.monitors) == 0) {
+        g_message("No controllable monitors found on retry");
+        /* Restore attempt counter */
+        app_data.monitor_retry_attempt = saved_attempt;
+
+        /* Schedule next retry based on attempt number */
+        if (app_data.monitor_retry_attempt == 1) {
+            app_data.monitor_retry_attempt = 2;
+            app_data.monitor_retry_timer = g_timeout_add_seconds(60, load_monitors_with_retry, NULL);
+            g_message("No controllable monitors found on retry 1, will retry in 60 seconds...");
+        } else if (app_data.monitor_retry_attempt == 2) {
+            app_data.monitor_retry_attempt = 3;
+            app_data.monitor_retry_timer = g_timeout_add_seconds(90, load_monitors_with_retry, NULL);
+            g_message("No controllable monitors found on retry 2, will retry in 90 seconds...");
+        } else {
+            app_data.monitor_retry_attempt = 0;
+            app_data.monitors_found = FALSE;
+            g_message("All controllable monitor detection attempts failed");
+
+#if HAVE_APPINDICATOR
+            update_tray_icon_label();
+#endif
+        }
+
+        return FALSE;
+    }
+
+    /* Controllable monitors found! */
     app_data.monitors_found = TRUE;
     app_data.monitor_retry_attempt = 0;
-    g_message("Monitors detected successfully on retry!");
+    g_message("Controllable monitors detected successfully on retry!");
 
-    /* Populate combo box */
+    /* Migrate any light sensor curves that moved to a new I2C bus */
+    migrate_monitor_curves();
+
+    /* Populate combo box with controllable monitors only */
     char *default_monitor = config_get_default_monitor(app_data.config);
     int default_index = -1;
 
@@ -1210,26 +1471,28 @@ static gboolean load_monitors_with_retry(gpointer data)
 
         gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(app_data.monitor_combo), display_name);
 
+        /* Check if this is the previously selected monitor */
         if (default_monitor && strcmp(device_path, default_monitor) == 0) {
             default_index = i;
         }
     }
 
-    /* Free the allocated default monitor string */
     g_free(default_monitor);
 
-    /* Select default monitor */
+    /* Select monitor: restore previous selection or select first */
     if (default_index >= 0) {
+        g_message("Restoring previously selected monitor at index %d", default_index);
         gtk_combo_box_set_active(GTK_COMBO_BOX(app_data.monitor_combo), default_index);
     } else {
+        g_message("No previous selection, selecting first monitor");
         gtk_combo_box_set_active(GTK_COMBO_BOX(app_data.monitor_combo), 0);
     }
-    
+
 #if HAVE_APPINDICATOR
     /* Update tray icon to reflect monitors found */
     update_tray_icon_label();
 #endif
-    
+
     return FALSE; /* Stop the timer */
 }
 
@@ -1241,111 +1504,82 @@ static gboolean recheck_monitors_immediately(gpointer data)
     /* Clear the timer ID since we're executing now */
     app_data.recheck_timer_id = 0;
 
-    g_message("Re-checking monitor availability immediately");
-    
-    /* Save current state to compare after re-detection */
-    gboolean had_monitors = app_data.monitors_found;
-    
-    /* Re-run monitor detection */
-    load_monitors();
-    
-    /* If we had monitors before but don't now, update the UI appropriately */
-    if (had_monitors && !app_data.monitors_found) {
-        g_message("Monitor disconnection detected - updating UI");
-        
-        /* Clear current monitor selection */
-        app_data.current_monitor = NULL;
-        
-        /* Clear combo box */
-        GtkTreeModel *model = gtk_combo_box_get_model(GTK_COMBO_BOX(app_data.monitor_combo));
-        if (model) {
-            gtk_list_store_clear(GTK_LIST_STORE(model));
-        }
-        
-        /* Reset brightness display */
-        gtk_range_set_value(GTK_RANGE(app_data.brightness_scale), 50);
-        update_brightness_display();
-        
-#if HAVE_APPINDICATOR
-        /* Update tray icon to show "X" */
-        update_tray_icon_label();
-#endif
+    g_message("Re-checking monitor availability");
+
+    /* Cancel any pending retry timer */
+    if (app_data.monitor_retry_timer > 0) {
+        g_source_remove(app_data.monitor_retry_timer);
+        app_data.monitor_retry_timer = 0;
     }
-    
+
+    /* Set retry attempt to avoid triggering another retry from load_monitors */
+    app_data.monitor_retry_attempt = -2;  /* Special value for manual/auto refresh */
+
+    /* Re-run monitor detection - this will properly filter and select monitors */
+    load_monitors();
+
+    /* Reset retry attempt */
+    app_data.monitor_retry_attempt = 0;
+
     return FALSE; /* Single execution */
 }
 
-/* Auto-refresh monitors when DDC communication fails */
+/* Auto-refresh monitors when DDC communication fails.
+ *
+ * Instead of immediately re-probing via ddccontrol -p (which adds more traffic
+ * to an already-failing DDC/AUX channel and can cascade into a link collapse),
+ * we enter a cooldown period and let udev events or the cooldown timer trigger
+ * re-detection once the DP link has had time to recover.
+ */
 static gboolean auto_refresh_monitors_on_failure(void)
 {
-    /* Rate limiting: prevent refresh more than once per second */
+    /* Rate limiting: prevent entering cooldown more than once per second */
     static time_t last_refresh_time = 0;
     time_t current_time = time(NULL);
 
     if (current_time - last_refresh_time < MONITOR_REFRESH_RATE_LIMIT_SECONDS) {
-        g_message("Auto-refresh rate limited (last refresh %.0f seconds ago)",
-                  difftime(current_time, last_refresh_time));
         return FALSE;
     }
 
     last_refresh_time = current_time;
-    g_message("DDC communication failed, auto-refreshing monitors...");
 
-    /* Set flag to prevent recursion during refresh */
-    app_data.in_monitor_refresh = TRUE;
-
-    /* Save current state */
-    gboolean had_monitors = app_data.monitors_found;
-    const char *current_device_path = NULL;
-    if (app_data.current_monitor) {
-        current_device_path = monitor_get_device_path(app_data.current_monitor);
-    }
-
-    /* Refresh monitors */
-    load_monitors();
-
-    /* Try to restore the same monitor selection if possible */
-    if (current_device_path && app_data.monitors && monitor_list_get_count(app_data.monitors) > 0) {
-        for (int i = 0; i < monitor_list_get_count(app_data.monitors); i++) {
-            Monitor *monitor = monitor_list_get_monitor(app_data.monitors, i);
-            if (strcmp(monitor_get_device_path(monitor), current_device_path) == 0) {
-                app_data.current_monitor = monitor_list_get_monitor(app_data.monitors, i);
-                gtk_combo_box_set_active(GTK_COMBO_BOX(app_data.monitor_combo), i);
-                break;
-            }
-        }
-    }
-
-    /* Clear refresh flag */
-    app_data.in_monitor_refresh = FALSE;
-
-    /* Check if we successfully found monitors after refresh */
-    if (app_data.monitors_found) {
-        g_message("Monitor refresh successful");
-        return TRUE;
-    } else {
-        g_message("Monitor refresh failed - no monitors found");
-
-        /* Update UI to reflect no monitors available */
-        app_data.current_monitor = NULL;
-
-        /* Clear combo box */
-        GtkTreeModel *model = gtk_combo_box_get_model(GTK_COMBO_BOX(app_data.monitor_combo));
-        if (model) {
-            gtk_list_store_clear(GTK_LIST_STORE(model));
-        }
-
-        /* Reset brightness display */
-        gtk_range_set_value(GTK_RANGE(app_data.brightness_scale), 50);
-        update_brightness_display();
-
-#if HAVE_APPINDICATOR
-        /* Update tray icon to show "X" */
-        update_tray_icon_label();
-#endif
-
+    /* If already in cooldown, don't reset the timer */
+    if (current_time < app_data.ddc_cooldown_until) {
         return FALSE;
     }
+
+    /* Enter DDC cooldown: stop all DDC traffic so the DP link can recover */
+    app_data.ddc_cooldown_until = current_time + DDC_COOLDOWN_SECONDS;
+    g_message("DDC communication failed — entering %ds cooldown to protect DP link",
+              DDC_COOLDOWN_SECONDS);
+
+    /* Clear monitor state without running ddccontrol -p */
+    if (app_data.monitors) {
+        monitor_list_free(app_data.monitors);
+        app_data.monitors = NULL;
+    }
+    app_data.current_monitor = NULL;
+    app_data.monitors_found = FALSE;
+
+    GtkTreeModel *model = gtk_combo_box_get_model(GTK_COMBO_BOX(app_data.monitor_combo));
+    if (model) {
+        gtk_list_store_clear(GTK_LIST_STORE(model));
+    }
+
+    gtk_range_set_value(GTK_RANGE(app_data.brightness_scale), 50);
+    update_brightness_display();
+
+#if HAVE_APPINDICATOR
+    update_tray_icon_label();
+#endif
+
+    /* Schedule re-detection after cooldown; udev events may also trigger it sooner */
+    if (app_data.recheck_timer_id > 0) {
+        g_source_remove(app_data.recheck_timer_id);
+    }
+    app_data.recheck_timer_id = g_timeout_add_seconds(DDC_COOLDOWN_SECONDS,
+                                                       recheck_monitors_immediately, NULL);
+    return FALSE;
 }
 
 /* Update brightness percentage display */
@@ -2120,21 +2354,21 @@ static gboolean on_udev_event(GIOChannel *channel, GIOCondition condition, gpoin
                     }
 
                     if (strcmp(action, "add") == 0) {
-                        /* Device added - retry detection if we don't have monitors */
-                        /* Debounce: wait to allow multiple rapid events to settle */
-                        if (!app_data.monitors_found) {
-                            app_data.monitor_retry_attempt = 1;
-                            app_data.monitor_retry_timer = g_timeout_add_seconds(UDEV_DEBOUNCE_SECONDS, load_monitors_with_retry, NULL);
-                            g_message("Hardware added, will retry monitor detection in %d seconds", UDEV_DEBOUNCE_SECONDS);
-                        }
-                    } else if (strcmp(action, "remove") == 0) {
-                        /* Device removed - re-check to see if our monitor was disconnected */
-                        /* Debounce: cancel any existing recheck timer and wait */
+                        /* Device added - trigger monitor refresh to pick up newly connected displays */
+                        /* Use longer debounce to allow DDC/CI hardware to fully stabilize */
                         if (app_data.recheck_timer_id > 0) {
                             g_source_remove(app_data.recheck_timer_id);
                         }
-                        app_data.recheck_timer_id = g_timeout_add_seconds(UDEV_DEBOUNCE_SECONDS, recheck_monitors_immediately, NULL);
-                        g_message("Hardware removed, will re-check monitor status in %d seconds", UDEV_DEBOUNCE_SECONDS);
+                        app_data.recheck_timer_id = g_timeout_add_seconds(UDEV_DEBOUNCE_ADD_SECONDS, recheck_monitors_immediately, NULL);
+                        g_message("Hardware added, will refresh monitors in %d seconds to allow DDC/CI to stabilize", UDEV_DEBOUNCE_ADD_SECONDS);
+                    } else if (strcmp(action, "remove") == 0) {
+                        /* Device removed - re-check to see if our monitor was disconnected */
+                        /* Use shorter debounce for removals */
+                        if (app_data.recheck_timer_id > 0) {
+                            g_source_remove(app_data.recheck_timer_id);
+                        }
+                        app_data.recheck_timer_id = g_timeout_add_seconds(UDEV_DEBOUNCE_REMOVE_SECONDS, recheck_monitors_immediately, NULL);
+                        g_message("Hardware removed, will re-check monitor status in %d seconds", UDEV_DEBOUNCE_REMOVE_SECONDS);
                     }
                 }
             }
@@ -2267,6 +2501,7 @@ static gboolean on_laptop_backlight_change(GIOChannel *channel, GIOCondition con
     g_message("Laptop brightness changed to %d%%", current_brightness);
 
     /* Update all monitors that are in laptop display mode */
+    /* Note: app_data.monitors only contains controllable monitors (filtered during detection) */
     if (app_data.monitors) {
         for (int i = 0; i < monitor_list_get_count(app_data.monitors); i++) {
             Monitor *monitor = monitor_list_get_monitor(app_data.monitors, i);
@@ -2283,27 +2518,108 @@ static gboolean on_laptop_backlight_change(GIOChannel *channel, GIOCondition con
                 if (target_brightness < 0) target_brightness = 0;
                 if (target_brightness > 100) target_brightness = 100;
 
-                /* Apply the new brightness */
-                monitor_set_brightness_with_retry(monitor, target_brightness, auto_refresh_monitors_on_failure);
+                /* Use gradual transition instead of direct DDC command.
+                 * When laptop brightness oscillates rapidly during idle/dim events,
+                 * direct DDC calls per inotify event can overwhelm the DDC/AUX channel.
+                 * The transition timer applies at most one DDC command per 200ms and
+                 * naturally tracks the latest target if it changes mid-transition. */
+                monitor_set_target_brightness(monitor, target_brightness);
 
-                /* Update UI if this is the current monitor */
-                if (monitor == app_data.current_monitor) {
-                    app_data.updating_from_auto = TRUE;
-                    gtk_range_set_value(GTK_RANGE(app_data.brightness_scale), target_brightness);
-                    app_data.updating_from_auto = FALSE;
-                    update_brightness_display();
-
-                    g_message("Applied laptop brightness %d%% + offset %d%% -> %d%% to monitor",
-                             current_brightness, offset, target_brightness);
-
-#if HAVE_APPINDICATOR
-                    /* Update tray icon label to reflect the new brightness */
-                    update_tray_icon_label();
-#endif
-                }
+                g_message("Laptop brightness %d%% + offset %d%% -> target %d%% (gradual transition)",
+                         current_brightness, offset, target_brightness);
             }
         }
     }
 
     return TRUE;  /* Keep the watch active */
+}
+
+/* Suspend preparation handler */
+static void on_suspend_prepare(gpointer data)
+{
+    (void)data;  /* Unused parameter */
+    
+    if (!app_data.power_manager || !app_data.monitors) {
+        return;
+    }
+    
+    g_message("Preparing for system suspend...");
+    
+    /* Save current brightness state for all monitors */
+    GList *all_monitors = NULL;
+    if (app_data.monitors) {
+        for (int i = 0; i < monitor_list_get_count(app_data.monitors); i++) {
+            Monitor *monitor = monitor_list_get_monitor(app_data.monitors, i);
+            if (monitor) {
+                all_monitors = g_list_append(all_monitors, monitor);
+            }
+        }
+    }
+    
+    power_manager_save_brightness_state(app_data.power_manager, all_monitors);
+    
+    /* Mark system as suspended */
+    app_data.power_manager->system_suspended = TRUE;
+    
+    if (all_monitors) {
+        g_list_free(all_monitors);
+    }
+    
+    g_message("Suspend preparation complete");
+}
+
+/* Called 5 seconds after resume to restore DDC brightness once monitors are stable */
+static gboolean post_resume_restore_brightness(gpointer data)
+{
+    (void)data;
+
+    if (!app_data.power_manager || app_data.power_manager->system_suspended) {
+        return G_SOURCE_REMOVE;
+    }
+
+    GList *all_monitors = NULL;
+    if (app_data.monitors) {
+        for (int i = 0; i < monitor_list_get_count(app_data.monitors); i++) {
+            Monitor *monitor = monitor_list_get_monitor(app_data.monitors, i);
+            if (monitor) all_monitors = g_list_append(all_monitors, monitor);
+        }
+    }
+
+    if (all_monitors) {
+        power_manager_restore_brightness_state(app_data.power_manager, all_monitors);
+        g_list_free(all_monitors);
+
+        if (app_data.current_monitor) {
+            int brightness = monitor_get_current_brightness(app_data.current_monitor);
+            if (brightness >= 0) {
+                app_data.updating_from_auto = TRUE;
+                gtk_range_set_value(GTK_RANGE(app_data.brightness_scale), brightness);
+                app_data.updating_from_auto = FALSE;
+                update_brightness_display();
+            }
+        }
+        g_message("Post-resume brightness restore complete");
+    }
+
+    return G_SOURCE_REMOVE;
+}
+
+/* Resume recovery handler — called from power_manager on PrepareForSleep(false) */
+static void on_resume_complete(gpointer data)
+{
+    (void)data;
+
+    if (!app_data.power_manager) return;
+
+    g_message("System resume detected, re-detecting monitors...");
+
+    /* system_suspended is already cleared by power_manager before this callback */
+
+    /* Kick off monitor detection immediately; the retry timer handles the case
+     * where the hardware (UCSI / DP link) isn't ready yet. */
+    load_monitors();
+
+    /* Restore DDC brightness asynchronously after a short delay so we don't
+     * block the main loop and give the DP link time to train. */
+    g_timeout_add_seconds(5, post_resume_restore_brightness, NULL);
 }

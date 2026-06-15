@@ -29,18 +29,28 @@ else
 	UDEV_LDFLAGS = 
 endif
 
-CFLAGS = -Wall -Wextra -O2 -std=c99 $(shell pkg-config --cflags gtk+-3.0 glib-2.0) $(APPINDICATOR_CFLAGS) $(UDEV_CFLAGS)
-LDFLAGS = $(shell pkg-config --libs gtk+-3.0 glib-2.0) $(APPINDICATOR_LDFLAGS) $(UDEV_LDFLAGS)
+# Check for systemd headers for suspend/resume support
+SYSTEMD_HEADERS := $(shell echo '#include <systemd/sd-login.h>' | gcc -E -x c - >/dev/null 2>&1 && echo "yes" || echo "no")
+ifeq ($(SYSTEMD_HEADERS),yes)
+	SYSTEMD_CFLAGS = -DHAVE_SYSTEMD
+	SYSTEMD_LDFLAGS = -lsystemd
+else
+	SYSTEMD_CFLAGS = 
+	SYSTEMD_LDFLAGS = 
+endif
+
+CFLAGS = -Wall -Wextra -O2 -std=c99 $(shell pkg-config --cflags gtk+-3.0 glib-2.0) $(APPINDICATOR_CFLAGS) $(UDEV_CFLAGS) $(SYSTEMD_CFLAGS)
+LDFLAGS = $(shell pkg-config --libs gtk+-3.0 glib-2.0) $(APPINDICATOR_LDFLAGS) $(UDEV_LDFLAGS) $(SYSTEMD_LDFLAGS)
 
 # Target executable
 TARGET = ddc-automatic-brightness-gtk
 
 # Source files
-SOURCES = main.c brightness_control.c monitor_detect.c config.c scheduler.c schedule_dialog.c light_sensor.c light_sensor_dialog.c laptop_backlight.c
+SOURCES = main.c brightness_control.c monitor_detect.c config.c scheduler.c schedule_dialog.c light_sensor.c light_sensor_dialog.c laptop_backlight.c power_management.c
 OBJECTS = $(SOURCES:.c=.o)
 
 # Header files
-HEADERS = brightness_control.h monitor_detect.h config.h scheduler.h light_sensor.h light_sensor_dialog.h laptop_backlight.h
+HEADERS = brightness_control.h monitor_detect.h config.h scheduler.h light_sensor.h light_sensor_dialog.h laptop_backlight.h power_management.h
 
 # Default target
 all: $(TARGET)
@@ -73,6 +83,12 @@ check-deps:
 	else \
 		echo "⚠ libudev headers not found - hardware auto-detection will be disabled"; \
 		echo "  For auto-detection support, install: sudo apt install libudev-dev"; \
+	fi
+	@if echo '#include <systemd/sd-login.h>' | gcc -E -x c - >/dev/null 2>&1; then \
+		echo "✓ systemd support available (suspend/resume handling enabled)"; \
+	else \
+		echo "⚠ systemd headers not found - suspend/resume handling will be disabled"; \
+		echo "  For suspend/resume support, install: sudo apt install libsystemd-dev"; \
 	fi
 
 # Install target
@@ -139,7 +155,7 @@ package-deb: $(TARGET)
 	echo "Priority: optional" >> package-deb/DEBIAN/control
 	echo "Architecture: $(DEB_ARCH)" >> package-deb/DEBIAN/control
 	echo "Depends: libgtk-3-0, libglib2.0-0, libayatana-appindicator3-1, ddccontrol" >> package-deb/DEBIAN/control
-	echo "Recommends: libudev1" >> package-deb/DEBIAN/control
+	echo "Recommends: libudev1, libsystemd0" >> package-deb/DEBIAN/control
 	echo "Maintainer: $$(echo '$(PKG_MAINTAINER)')" >> package-deb/DEBIAN/control
 	echo "Homepage: $(PKG_HOMEPAGE)" >> package-deb/DEBIAN/control
 	echo "Description: $(PKG_DESC)" >> package-deb/DEBIAN/control
