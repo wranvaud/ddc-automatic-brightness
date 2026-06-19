@@ -18,7 +18,18 @@ A GTK application for controlling external monitor brightness using DDC/CI with 
 
 ## Installation
 
-### Prerequisites
+### Download pre-built package (easiest)
+
+Download the latest `.deb` from the [Releases page](https://github.com/wranvaud/ddc-automatic-brightness/releases/latest) and install:
+
+```bash
+sudo apt install ddccontrol          # runtime dependency
+sudo dpkg -i ddc-automatic-brightness-gtk_*.deb
+```
+
+### Build from source
+
+#### Prerequisites
 
 ```bash
 # Ubuntu/Debian (Required)
@@ -34,7 +45,7 @@ sudo dnf install gcc gtk3-devel glib2-devel libayatana-appindicator-gtk3-devel d
 sudo pacman -S base-devel gtk3 glib2 libayatana-appindicator ddccontrol systemd-libs
 ```
 
-### Build and Install
+#### Build and install
 
 ```bash
 cd src/
@@ -46,7 +57,7 @@ sudo make install
 
 # Or create package for distribution
 make package
-sudo dpkg -i ddc-automatic-brightness-gtk_1.1.0_amd64.deb
+sudo dpkg -i ddc-automatic-brightness-gtk_[version]_amd64.deb
 ```
 
 ## Usage
