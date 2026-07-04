@@ -39,7 +39,10 @@ else
 	SYSTEMD_LDFLAGS = 
 endif
 
-CFLAGS = -Wall -Wextra -O2 -std=c99 $(shell pkg-config --cflags gtk+-3.0 glib-2.0) $(APPINDICATOR_CFLAGS) $(UDEV_CFLAGS) $(SYSTEMD_CFLAGS)
+# Build date - captured when the object files are actually (re)compiled
+BUILD_DATE := $(shell date +%Y-%m-%d)
+
+CFLAGS = -Wall -Wextra -O2 -std=c99 -DBUILD_DATE=\"$(BUILD_DATE)\" $(shell pkg-config --cflags gtk+-3.0 glib-2.0) $(APPINDICATOR_CFLAGS) $(UDEV_CFLAGS) $(SYSTEMD_CFLAGS)
 LDFLAGS = $(shell pkg-config --libs gtk+-3.0 glib-2.0) $(APPINDICATOR_LDFLAGS) $(UDEV_LDFLAGS) $(SYSTEMD_LDFLAGS)
 
 # Target executable

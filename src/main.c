@@ -45,6 +45,12 @@
 #define APP_NAME "DDC Automatic Brightness"
 #define APP_AUTHOR "Drilix LTDA"
 
+/* BUILD_DATE is injected by the Makefile at compile time (date the object
+ * files were actually built). Fall back to "unknown" if compiled another way. */
+#ifndef BUILD_DATE
+#define BUILD_DATE "unknown"
+#endif
+
 /* Timer and delay constants */
 #define AUTO_BRIGHTNESS_INTERVAL_SECONDS 5
 #define BRIGHTNESS_TRANSITION_INTERVAL_MS 200
@@ -634,12 +640,6 @@ static void on_about_clicked(GtkButton *button, gpointer data)
 {
     (void)button; (void)data;
 
-    /* Get current date for build date */
-    time_t now = time(NULL);
-    struct tm *build_time = localtime(&now);
-    char build_date[64];
-    strftime(build_date, sizeof(build_date), "%Y-%m-%d", build_time);
-
     /* Create a plain dialog (silent, no sound) */
     GtkWidget *about_dialog = gtk_dialog_new_with_buttons(
         "About",
@@ -678,7 +678,7 @@ static void on_about_clicked(GtkButton *button, gpointer data)
     gtk_label_set_markup(GTK_LABEL(date_title), "<b>Build Date</b>");
     gtk_box_pack_start(GTK_BOX(vbox), date_title, FALSE, FALSE, 0);
 
-    GtkWidget *date_value = gtk_label_new(build_date);
+    GtkWidget *date_value = gtk_label_new(BUILD_DATE);
     gtk_box_pack_start(GTK_BOX(vbox), date_value, FALSE, FALSE, 5);
 
     /* Author */
