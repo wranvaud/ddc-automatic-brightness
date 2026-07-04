@@ -12,6 +12,40 @@
 #include <limits.h>
 #include <sys/wait.h>
 
+/* Find the DRM connector sysfs name for a given i2c bus number.
+ * Scans /sys/class/drm/<connector>/ddc symlinks.
+ * Caller must g_free() the result.  Returns NULL if no match found. */
+static char* find_drm_connector_for_i2c(int i2c_num)
+{
+    DIR *drm_dir = opendir("/sys/class/drm");
+    if (!drm_dir) return NULL;
+
+    char *connector_name = NULL;
+    struct dirent *entry;
+    char path[PATH_MAX];
+    char link_target[PATH_MAX];
+    char i2c_pattern[32];
+
+    snprintf(i2c_pattern, sizeof(i2c_pattern), "i2c-%d", i2c_num);
+
+    while ((entry = readdir(drm_dir)) != NULL) {
+        if (!strstr(entry->d_name, "card")) continue;
+
+        snprintf(path, sizeof(path), "/sys/class/drm/%s/ddc", entry->d_name);
+        ssize_t len = readlink(path, link_target, sizeof(link_target) - 1);
+        if (len <= 0) continue;
+        link_target[len] = '\0';
+
+        if (strstr(link_target, i2c_pattern)) {
+            connector_name = g_strdup(entry->d_name);
+            break;
+        }
+    }
+
+    closedir(drm_dir);
+    return connector_name;
+}
+
 /* Check if an i2c device corresponds to an internal display (eDP or LVDS) */
 static gboolean is_internal_display(const char *device_path)
 {
@@ -155,6 +189,16 @@ MonitorList* monitor_detect_all(void)
                 if (strlen(current_name) > 0)
                     monitor_set_model_name(monitor, current_name);
 
+                /* Store DRM connector path for fast link-status pre-checks */
+                const char *d = strrchr(current_device, '-');
+                if (d) {
+                    char *drm_conn = find_drm_connector_for_i2c(atoi(d + 1));
+                    if (drm_conn) {
+                        monitor_set_drm_connector(monitor, drm_conn);
+                        g_free(drm_conn);
+                    }
+                }
+
                 monitor_list_add(list, monitor);
                 g_message("Found monitor: %s (%s)", current_device, type_label);
             }
@@ -205,6 +249,16 @@ MonitorList* monitor_detect_all(void)
         monitor_set_internal(monitor, is_internal);
         if (strlen(current_name) > 0)
             monitor_set_model_name(monitor, current_name);
+
+        /* Store DRM connector path for fast link-status pre-checks */
+        const char *d = strrchr(current_device, '-');
+        if (d) {
+            char *drm_conn = find_drm_connector_for_i2c(atoi(d + 1));
+            if (drm_conn) {
+                monitor_set_drm_connector(monitor, drm_conn);
+                g_free(drm_conn);
+            }
+        }
 
         monitor_list_add(list, monitor);
         g_message("Found monitor: %s (%s)", current_device, type_label);

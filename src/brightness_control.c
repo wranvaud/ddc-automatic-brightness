@@ -9,17 +9,45 @@
 #include <unistd.h>
 #include <sys/wait.h>
 #include <regex.h>
+#include <limits.h>
+#include <time.h>
+
+#define DDC_FAILURE_THRESHOLD 3   /* consecutive DDC failures before per-monitor backoff */
+#define DDC_BACKOFF_SECONDS   45  /* how long to pause DDC per monitor after threshold hit */
+
+/* Check DRM connector link state without touching the AUX bus.
+ * Returns TRUE (assume connected) if connector path is unknown or unreadable. */
+static gboolean drm_connector_is_connected(const char *connector)
+{
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "/sys/class/drm/%s/status", connector);
+
+    FILE *f = fopen(path, "r");
+    if (!f) return TRUE;
+
+    char status[32] = {0};
+    (void)fgets(status, sizeof(status), f);
+    fclose(f);
+
+    char *nl = strchr(status, '\n');
+    if (nl) *nl = '\0';
+
+    return (strcmp(status, "connected") == 0);
+}
 
 /* Monitor structure */
 struct _Monitor {
     char *device_path;
     char *display_name;
     char *model_name;         /* Raw model name from ddccontrol (e.g. "Samsung standard LCD") */
+    char *drm_connector;      /* DRM sysfs name (e.g. "card1-DP-1"), NULL if unknown */
     gboolean available;
     gboolean is_internal;
     int current_brightness;  /* Last brightness value actually sent to monitor (-1 = unknown) */
     int target_brightness;   /* Target brightness for gradual transitions (-1 = no transition) */
     double stable_lux;       /* Last lux value used to set brightness (for hysteresis, -1.0 = unknown) */
+    int ddc_failure_count;   /* Consecutive DDC call failures (resets on success) */
+    time_t ddc_backoff_until; /* Skip DDC calls for this monitor until this time (0 = no backoff) */
 };
 
 /* Monitor list structure */
@@ -34,11 +62,14 @@ Monitor* monitor_new(const char *device_path, const char *name)
     monitor->device_path = g_strdup(device_path);
     monitor->display_name = g_strdup(name ? name : device_path);
     monitor->model_name = NULL;
+    monitor->drm_connector = NULL;
     monitor->available = TRUE;
     monitor->is_internal = FALSE;  /* Will be set during detection */
     monitor->current_brightness = -1;  /* Unknown initial brightness */
     monitor->target_brightness = -1;   /* No transition pending */
     monitor->stable_lux = -1.0;        /* Unknown initial lux */
+    monitor->ddc_failure_count = 0;
+    monitor->ddc_backoff_until = 0;
 
     return monitor;
 }
@@ -50,6 +81,7 @@ void monitor_free(Monitor *monitor)
         g_free(monitor->device_path);
         g_free(monitor->display_name);
         g_free(monitor->model_name);
+        g_free(monitor->drm_connector);
         g_free(monitor);
     }
 }
@@ -80,6 +112,26 @@ void monitor_set_model_name(Monitor *monitor, const char *model_name)
     monitor->model_name = model_name ? g_strdup(model_name) : NULL;
 }
 
+/* Get DRM connector sysfs name */
+const char* monitor_get_drm_connector(Monitor *monitor)
+{
+    return monitor ? monitor->drm_connector : NULL;
+}
+
+/* Set DRM connector sysfs name */
+void monitor_set_drm_connector(Monitor *monitor, const char *connector)
+{
+    if (!monitor) return;
+    g_free(monitor->drm_connector);
+    monitor->drm_connector = connector ? g_strdup(connector) : NULL;
+}
+
+/* Check if this monitor is currently backing off DDC calls after repeated failures */
+gboolean monitor_is_ddc_backoff_active(Monitor *monitor)
+{
+    return monitor && time(NULL) < monitor->ddc_backoff_until;
+}
+
 /* Check if monitor is internal display */
 gboolean monitor_is_internal(const Monitor *monitor)
 {
@@ -100,10 +152,26 @@ int monitor_get_brightness(Monitor *monitor)
     if (!monitor || !monitor->available) {
         return -1;
     }
-    
+
+    /* Fast non-blocking pre-check: skip DDC entirely if DP link is known down */
+    if (monitor->drm_connector &&
+        !drm_connector_is_connected(monitor->drm_connector)) {
+        g_message("Skipping DDC read for %s — connector %s is disconnected",
+                  monitor->device_path, monitor->drm_connector);
+        monitor->available = FALSE;
+        return -1;
+    }
+
+    /* Fast pre-check: skip DDC entirely while this monitor is backing off
+     * after repeated failures, so a degrading DDC/AUX channel doesn't keep
+     * getting hammered while it's trying to recover. */
+    if (monitor_is_ddc_backoff_active(monitor)) {
+        return -1;
+    }
+
     /* Execute ddccontrol command to read brightness */
     char command[256];
-    snprintf(command, sizeof(command), "ddccontrol -r 0x10 dev:%s 2>/dev/null", 
+    snprintf(command, sizeof(command), "ddccontrol -r 0x10 dev:%s 2>/dev/null",
              monitor->device_path);
     
     FILE *fp = popen(command, "r");
@@ -145,10 +213,21 @@ int monitor_get_brightness(Monitor *monitor)
     pclose(fp);
     
     if (brightness < 0) {
-        g_warning("Failed to read brightness from monitor %s", monitor->device_path);
+        monitor->ddc_failure_count++;
+        if (monitor->ddc_failure_count >= DDC_FAILURE_THRESHOLD) {
+            monitor->ddc_backoff_until = time(NULL) + DDC_BACKOFF_SECONDS;
+            g_warning("Monitor %s: %d consecutive DDC failures — backing off for %ds",
+                      monitor->device_path, monitor->ddc_failure_count, DDC_BACKOFF_SECONDS);
+        } else {
+            g_warning("Failed to read brightness from monitor %s (failure %d/%d)",
+                      monitor->device_path, monitor->ddc_failure_count, DDC_FAILURE_THRESHOLD);
+        }
         monitor->available = FALSE;
+    } else {
+        monitor->ddc_failure_count = 0;
+        monitor->ddc_backoff_until = 0;
     }
-    
+
     return brightness;
 }
 
@@ -161,6 +240,22 @@ gboolean monitor_set_brightness(Monitor *monitor, int brightness)
 
     if (brightness < 0 || brightness > 100) {
         g_warning("Invalid brightness value: %d", brightness);
+        return FALSE;
+    }
+
+    /* Fast non-blocking pre-check: skip DDC entirely if DP link is known down */
+    if (monitor->drm_connector &&
+        !drm_connector_is_connected(monitor->drm_connector)) {
+        g_message("Skipping DDC write for %s — connector %s is disconnected",
+                  monitor->device_path, monitor->drm_connector);
+        monitor->available = FALSE;
+        return FALSE;
+    }
+
+    /* Fast pre-check: skip DDC entirely while this monitor is backing off
+     * after repeated failures, so a degrading DDC/AUX channel doesn't keep
+     * getting hammered while it's trying to recover. */
+    if (monitor_is_ddc_backoff_active(monitor)) {
         return FALSE;
     }
 
@@ -179,12 +274,22 @@ gboolean monitor_set_brightness(Monitor *monitor, int brightness)
     int result = system(command);
 
     if (result != 0) {
-        g_warning("Failed to set brightness on monitor %s", monitor->device_path);
+        monitor->ddc_failure_count++;
+        if (monitor->ddc_failure_count >= DDC_FAILURE_THRESHOLD) {
+            monitor->ddc_backoff_until = time(NULL) + DDC_BACKOFF_SECONDS;
+            g_warning("Monitor %s: %d consecutive DDC failures — backing off for %ds",
+                      monitor->device_path, monitor->ddc_failure_count, DDC_BACKOFF_SECONDS);
+        } else {
+            g_warning("Failed to set brightness on monitor %s (failure %d/%d)",
+                      monitor->device_path, monitor->ddc_failure_count, DDC_FAILURE_THRESHOLD);
+        }
         monitor->available = FALSE;
         return FALSE;
     }
 
-    /* Update current brightness tracking on success */
+    /* Success: reset failure counter/backoff and update tracked brightness */
+    monitor->ddc_failure_count = 0;
+    monitor->ddc_backoff_until = 0;
     monitor->current_brightness = brightness;
     g_debug("Successfully set brightness to %d%% for %s", brightness, monitor->device_path);
 

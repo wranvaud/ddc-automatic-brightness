@@ -30,6 +30,7 @@ int monitor_get_brightness(Monitor *monitor);
 gboolean monitor_set_brightness(Monitor *monitor, int brightness);
 gboolean monitor_is_available(Monitor *monitor);
 void monitor_set_available(Monitor *monitor, gboolean available);
+gboolean monitor_is_ddc_backoff_active(Monitor *monitor);
 
 /* Brightness tracking for gradual transitions */
 int monitor_get_current_brightness(Monitor *monitor);
@@ -39,6 +40,10 @@ void monitor_set_target_brightness(Monitor *monitor, int brightness);
 /* Lux tracking for hysteresis */
 double monitor_get_stable_lux(Monitor *monitor);
 void monitor_set_stable_lux(Monitor *monitor, double lux);
+
+/* DRM connector path (e.g. "card1-DP-1") for link-status pre-checks */
+const char* monitor_get_drm_connector(Monitor *monitor);
+void monitor_set_drm_connector(Monitor *monitor, const char *connector);
 
 /* Enhanced functions with auto-refresh capability */
 typedef gboolean (*MonitorRefreshCallback)(void);

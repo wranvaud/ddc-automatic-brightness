@@ -745,6 +745,14 @@ static gboolean brightness_transition_timer_callback(gpointer data)
                 continue;
             }
 
+            /* Skip monitors currently backing off after repeated DDC failures —
+             * stepping into an already-failing channel every 200ms is what turns
+             * a transient DDC/AUX glitch into a sustained storm that can collapse
+             * the physical DP link. */
+            if (monitor_is_ddc_backoff_active(monitor)) {
+                continue;
+            }
+
             /* Move one step toward target */
             int next_brightness;
             if (current < 0) {
@@ -1171,6 +1179,8 @@ static MonitorList* filter_controllable_monitors(MonitorList *all_monitors)
             monitor_set_available(filtered_monitor, monitor_is_available(monitor));
             if (monitor_get_model_name(monitor))
                 monitor_set_model_name(filtered_monitor, monitor_get_model_name(monitor));
+            if (monitor_get_drm_connector(monitor))
+                monitor_set_drm_connector(filtered_monitor, monitor_get_drm_connector(monitor));
 
             monitor_list_add(filtered, filtered_monitor);
             controllable_count++;
@@ -2614,6 +2624,16 @@ static void on_resume_complete(gpointer data)
     g_message("System resume detected, re-detecting monitors...");
 
     /* system_suspended is already cleared by power_manager before this callback */
+
+    /* Reset retry state so load_monitors() starts a fresh retry sequence.
+     * Without this, a lingering non-zero monitor_retry_attempt from a previous
+     * startup or resume cycle suppresses the 30-s/60-s/90-s retries that are
+     * needed while the sleep hook recovers the DP link (can take up to ~50 s). */
+    if (app_data.monitor_retry_timer > 0) {
+        g_source_remove(app_data.monitor_retry_timer);
+        app_data.monitor_retry_timer = 0;
+    }
+    app_data.monitor_retry_attempt = 0;
 
     /* Kick off monitor detection immediately; the retry timer handles the case
      * where the hardware (UCSI / DP link) isn't ready yet. */
