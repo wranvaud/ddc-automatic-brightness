@@ -39,8 +39,21 @@ else
 	SYSTEMD_LDFLAGS = 
 endif
 
-# Build date - captured when the object files are actually (re)compiled
-BUILD_DATE := $(shell date +%Y-%m-%d)
+# Build date - reflects when the source was last modified in development,
+# not when this particular compile/package happened to run. Uses the commit
+# date of the last commit that touched this directory; falls back to today
+# only if there are uncommitted local changes (i.e. a real edit just happened)
+# or git/history is unavailable (e.g. building from a source tarball).
+BUILD_DATE := $(shell \
+	if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then \
+		if git status --porcelain -- . | grep -q .; then \
+			date +%Y-%m-%d; \
+		else \
+			git log -1 --format=%cd --date=short -- .; \
+		fi; \
+	else \
+		date +%Y-%m-%d; \
+	fi)
 
 CFLAGS = -Wall -Wextra -O2 -std=c99 -DBUILD_DATE=\"$(BUILD_DATE)\" $(shell pkg-config --cflags gtk+-3.0 glib-2.0) $(APPINDICATOR_CFLAGS) $(UDEV_CFLAGS) $(SYSTEMD_CFLAGS)
 LDFLAGS = $(shell pkg-config --libs gtk+-3.0 glib-2.0) $(APPINDICATOR_LDFLAGS) $(UDEV_LDFLAGS) $(SYSTEMD_LDFLAGS)
