@@ -36,7 +36,13 @@ static char* find_drm_connector_for_i2c(int i2c_num)
         if (len <= 0) continue;
         link_target[len] = '\0';
 
-        if (strstr(link_target, i2c_pattern)) {
+        /* Compare the trailing path component exactly (e.g. "i2c-14"), not a
+         * substring, so bus numbers that are prefixes of one another (i2c-1
+         * vs i2c-10, i2c-11, ...) can't match the wrong connector. */
+        const char *base = strrchr(link_target, '/');
+        base = base ? base + 1 : link_target;
+
+        if (strcmp(base, i2c_pattern) == 0) {
             connector_name = g_strdup(entry->d_name);
             break;
         }
