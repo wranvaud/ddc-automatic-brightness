@@ -14,6 +14,8 @@
 #include <time.h>
 #include <sys/stat.h>
 #include <sys/inotify.h>
+#include <sys/file.h>
+#include <fcntl.h>
 #include <errno.h>
 
 /* Check if libudev is available - this will be defined by the Makefile */
@@ -183,9 +185,46 @@ static void on_indicator_menu_show(GtkWidget *menu, gpointer data);
 static void update_tray_icon_label(void);
 #endif
 
+/* Single-instance guard: an flock() held on a lock file in the runtime dir.
+ * Prevents two instances polling DDC/CI concurrently, which can hammer a
+ * flaky external monitor's AUX channel hard enough to wedge it (see the DDC
+ * failure backoff in brightness_control.c). The fd is intentionally leaked
+ * for the lifetime of the process so the lock is held until it exits or
+ * crashes, at which point the kernel releases it automatically. */
+static gboolean acquire_single_instance_lock(void)
+{
+    const char *runtime_dir = g_get_user_runtime_dir();
+    char *lock_path = g_build_filename(runtime_dir, "ddc-automatic-brightness-gtk.lock", NULL);
+
+    int fd = open(lock_path, O_CREAT | O_RDWR, 0600);
+    g_free(lock_path);
+
+    if (fd < 0) {
+        g_warning("Could not open single-instance lock file: %s", g_strerror(errno));
+        return TRUE; /* fail open rather than block startup over a lock file issue */
+    }
+
+    if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
+        if (errno == EWOULDBLOCK) {
+            close(fd);
+            return FALSE; /* another instance already holds the lock */
+        }
+        g_warning("Could not acquire single-instance lock: %s", g_strerror(errno));
+        close(fd);
+        return TRUE; /* fail open */
+    }
+
+    return TRUE;
+}
+
 /* Main entry point */
 int main(int argc, char *argv[])
 {
+    if (!acquire_single_instance_lock()) {
+        fprintf(stderr, "DDC Automatic Brightness is already running.\n");
+        return 1;
+    }
+
     gboolean start_minimized = FALSE;
     gboolean no_gui = FALSE;
     
