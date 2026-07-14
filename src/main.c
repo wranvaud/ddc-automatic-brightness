@@ -41,7 +41,7 @@
 #include "power_management.h"
 
 /* Application version information */
-#define APP_VERSION "1.1.1"
+#define APP_VERSION "1.1.3"
 #define APP_NAME "DDC Automatic Brightness"
 #define APP_AUTHOR "Drilix LTDA"
 
