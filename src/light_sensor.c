@@ -11,15 +11,18 @@
 #include <math.h>
 
 /* Light sensor structure */
+/* Calibration curve point; same layout as LightSensorCurvePoint in config.h */
+typedef struct {
+    double lux;
+    int brightness;
+} CurvePoint;
+
 struct _LightSensor {
     char *device_path;
     gboolean available;
 
     /* Calibration curve points (lux -> brightness %) */
-    struct {
-        double lux;
-        int brightness;
-    } *curve_points;
+    CurvePoint *curve_points;
     int num_curve_points;
 };
 
@@ -28,12 +31,6 @@ static void set_default_curve(LightSensor *sensor)
 {
     /* Conservative default curve with 5 points */
     sensor->num_curve_points = 5;
-
-    /* Anonymous struct type for curve points */
-    typedef struct {
-        double lux;
-        int brightness;
-    } CurvePoint;
 
     sensor->curve_points = g_new(CurvePoint, sensor->num_curve_points);
 
@@ -295,12 +292,6 @@ void light_sensor_set_curve_points(LightSensor *sensor,
     /* Allocate new curve with 5 points */
     sensor->num_curve_points = 5;
 
-    /* Anonymous struct type for curve points */
-    typedef struct {
-        double lux;
-        int brightness;
-    } CurvePoint;
-
     sensor->curve_points = g_new(CurvePoint, sensor->num_curve_points);
 
     sensor->curve_points[0].lux = dark_lux;
@@ -331,12 +322,6 @@ void light_sensor_set_curve(LightSensor *sensor, const void *points_array, int c
 
     /* Allocate new curve */
     sensor->num_curve_points = count;
-
-    /* Anonymous struct type for curve points */
-    typedef struct {
-        double lux;
-        int brightness;
-    } CurvePoint;
 
     sensor->curve_points = g_new(CurvePoint, count);
 

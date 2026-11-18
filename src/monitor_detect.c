@@ -2,6 +2,8 @@
  * monitor_detect.c - Monitor detection implementation
  */
 
+#define _POSIX_C_SOURCE 200809L  /* readlink() under -std=c99 */
+
 #include "monitor_detect.h"
 #include <stdio.h>
 #include <stdlib.h>
