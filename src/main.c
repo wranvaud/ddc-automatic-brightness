@@ -17,6 +17,13 @@
 #include <sys/file.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <signal.h>
+#include <dirent.h>
+#include <glib-unix.h>
+
+#if HAVE_SYSTEMD
+#include <systemd/sd-login.h>
+#endif
 
 /* Check if libudev is available - this will be defined by the Makefile */
 #ifdef HAVE_LIBUDEV
@@ -108,6 +115,15 @@ typedef struct {
 
     /* DDC error cooldown: timestamp until which all DDC commands are paused */
     time_t ddc_cooldown_until;
+
+    /* Pending debounced write of the config file */
+    guint config_save_timer;
+
+    /* TRUE while another session (e.g. another account) owns the screen */
+    gboolean session_was_inactive;
+
+    /* Last seen "connector=status;" list, to spot monitors plugged in directly */
+    char *drm_connector_state;
     
     /* Udev monitoring for hardware changes */
 #if HAVE_LIBUDEV
@@ -127,6 +143,90 @@ typedef struct {
 } AppData;
 
 static AppData app_data = {0};
+
+/* Write settings to disk shortly after a change. Settings used to be written only
+ * on a clean exit, which never happens at logout or shutdown, so changes were lost. */
+static gboolean config_save_timer_callback(gpointer data)
+{
+    (void)data;
+    app_data.config_save_timer = 0;
+    if (app_data.config) {
+        config_save(app_data.config);
+    }
+    return G_SOURCE_REMOVE;
+}
+
+static void request_config_save(void)
+{
+    if (!app_data.config || app_data.config_save_timer) {
+        return;
+    }
+    app_data.config_save_timer = g_timeout_add_seconds(1, config_save_timer_callback, NULL);
+}
+
+/* SIGTERM/SIGINT/SIGHUP: leave the main loop so the normal cleanup (and save) runs */
+static gboolean on_quit_signal(gpointer data)
+{
+    g_message("Received %s, saving settings and exiting", (const char *)data);
+    gtk_main_quit();
+    return G_SOURCE_REMOVE;
+}
+
+/* TRUE when this account's session is the one on screen. Every account that is
+ * logged in runs its own copy of the app, and they all reach the same monitors,
+ * so only the copy in the foreground session may touch DDC. */
+static gboolean session_is_active(void)
+{
+#if HAVE_SYSTEMD
+    char *session = NULL;
+    uid_t uid = 0;
+    int r = sd_seat_get_active("seat0", &session, &uid);
+    free(session);
+    if (r < 0) {
+        return TRUE;  /* No seat information: don't block this copy */
+    }
+    return uid == getuid();
+#else
+    return TRUE;
+#endif
+}
+
+/* g_ptr_array_sort() passes pointers to the elements */
+static gint compare_str_ptrs(gconstpointer a, gconstpointer b)
+{
+    return g_strcmp0(*(const char * const *)a, *(const char * const *)b);
+}
+
+/* Snapshot of every DRM connector's status, e.g. "card1-DP-1=connected;..." */
+static char* read_drm_connector_state(void)
+{
+    GString *state = g_string_new(NULL);
+    DIR *dir = opendir("/sys/class/drm");
+    if (dir) {
+        GPtrArray *names = g_ptr_array_new_with_free_func(g_free);
+        struct dirent *entry;
+        while ((entry = readdir(dir)) != NULL) {
+            if (g_str_has_prefix(entry->d_name, "card") && strchr(entry->d_name, '-')) {
+                g_ptr_array_add(names, g_strdup(entry->d_name));
+            }
+        }
+        closedir(dir);
+        g_ptr_array_sort(names, compare_str_ptrs);
+        for (guint i = 0; i < names->len; i++) {
+            const char *name = g_ptr_array_index(names, i);
+            char *path = g_strdup_printf("/sys/class/drm/%s/status", name);
+            char *status = NULL;
+            if (g_file_get_contents(path, &status, NULL, NULL)) {
+                g_strstrip(status);
+                g_string_append_printf(state, "%s=%s;", name, status);
+                g_free(status);
+            }
+            g_free(path);
+        }
+        g_ptr_array_free(names, TRUE);
+    }
+    return g_string_free(state, FALSE);
+}
 
 /* Forward declarations */
 static void on_window_destroy(GtkWidget *widget, gpointer data);
@@ -248,6 +348,10 @@ int main(int argc, char *argv[])
     
     /* Initialize GTK */
     gtk_init(&argc, &argv);
+
+    g_unix_signal_add(SIGTERM, on_quit_signal, (gpointer)"SIGTERM");
+    g_unix_signal_add(SIGINT, on_quit_signal, (gpointer)"SIGINT");
+    g_unix_signal_add(SIGHUP, on_quit_signal, (gpointer)"SIGHUP");
     
     /* Initialize application components */
     app_data.config = config_new();
@@ -388,6 +492,13 @@ int main(int argc, char *argv[])
         power_manager_free(app_data.power_manager);
     }
 
+    if (app_data.config_save_timer > 0) {
+        g_source_remove(app_data.config_save_timer);
+        app_data.config_save_timer = 0;
+    }
+
+    g_free(app_data.drm_connector_state);
+
     if (app_data.config) {
         config_save(app_data.config);
         config_free(app_data.config);
@@ -420,7 +531,8 @@ static void on_monitor_changed(GtkComboBox *combo, gpointer data)
         if (app_data.current_monitor) {
             /* Save as default monitor */
             config_set_default_monitor(app_data.config,
-                                     monitor_get_device_path(app_data.current_monitor));
+                                     monitor_get_config_key(app_data.current_monitor));
+            request_config_save();
 
             /* Read current brightness */
             int brightness = monitor_get_brightness_with_retry(app_data.current_monitor, auto_refresh_monitors_on_failure);
@@ -446,7 +558,7 @@ static void on_monitor_changed(GtkComboBox *combo, gpointer data)
             
             /* Load auto brightness mode for this monitor */
             AutoBrightnessMode mode = config_get_monitor_auto_brightness_mode(app_data.config,
-                                                                              monitor_get_device_path(app_data.current_monitor));
+                                                                              monitor_get_config_key(app_data.current_monitor));
 
             /* Block radio button signals to prevent cascading callbacks during monitor refresh */
             g_signal_handlers_block_by_func(app_data.auto_brightness_disabled_radio,
@@ -486,7 +598,7 @@ static void on_monitor_changed(GtkComboBox *combo, gpointer data)
 
             /* Load brightness offset for this monitor */
             int offset = config_get_monitor_brightness_offset(app_data.config,
-                                                             monitor_get_device_path(app_data.current_monitor));
+                                                             monitor_get_config_key(app_data.current_monitor));
             app_data.updating_from_auto = TRUE;
             gtk_range_set_value(GTK_RANGE(app_data.brightness_offset_scale), offset);
             app_data.updating_from_auto = FALSE;
@@ -502,7 +614,7 @@ static void on_monitor_changed(GtkComboBox *combo, gpointer data)
 
             /* Load light sensor curve for this monitor (only when monitor changes) */
             if (light_sensor_is_available(app_data.light_sensor)) {
-                load_light_sensor_curve_for_monitor(monitor_get_device_path(app_data.current_monitor), "monitor changed");
+                load_light_sensor_curve_for_monitor(monitor_get_config_key(app_data.current_monitor), "monitor changed");
             }
         }
     }
@@ -553,7 +665,7 @@ static void on_brightness_offset_changed(GtkRange *range, gpointer data)
 
     /* Save offset for this monitor */
     config_set_monitor_brightness_offset(app_data.config,
-                                         monitor_get_device_path(app_data.current_monitor),
+                                         monitor_get_config_key(app_data.current_monitor),
                                          offset);
     config_save(app_data.config);
 }
@@ -620,8 +732,9 @@ static void on_auto_brightness_mode_changed(GtkToggleButton *button, gpointer da
 
     /* Save setting per monitor (fast, in-memory only) */
     config_set_monitor_auto_brightness_mode(app_data.config,
-                                            monitor_get_device_path(app_data.current_monitor),
+                                            monitor_get_config_key(app_data.current_monitor),
                                             mode);
+    request_config_save();
 
     /* Schedule high-priority callback for I/O operations (runs within ~1ms) */
     g_timeout_add(1, deferred_mode_change_callback, GINT_TO_POINTER(mode));
@@ -647,7 +760,7 @@ static void on_curve_clicked(GtkButton *button, gpointer data)
         return;
     }
 
-    const char *device_path = monitor_get_device_path(app_data.current_monitor);
+    const char *device_path = monitor_get_config_key(app_data.current_monitor);
     const char *display_name = monitor_get_display_name(app_data.current_monitor);
 
     /* Open curve configuration dialog */
@@ -772,6 +885,10 @@ static gboolean brightness_transition_timer_callback(gpointer data)
         return TRUE;
     }
 
+    if (app_data.session_was_inactive || !session_is_active()) {
+        return TRUE;
+    }
+
     /* Process each monitor's transition */
     if (app_data.monitors) {
         for (int i = 0; i < monitor_list_get_count(app_data.monitors); i++) {
@@ -836,6 +953,25 @@ static gboolean auto_brightness_timer_callback(gpointer data)
 {
     static gboolean previously_blanked = FALSE;
 
+    /* Pause while another account's session is on screen; when ours comes back,
+     * re-detect monitors since they may have been changed in the meantime. */
+    if (!session_is_active()) {
+        if (!app_data.session_was_inactive) {
+            g_message("Session is no longer in the foreground, pausing monitor control");
+            app_data.session_was_inactive = TRUE;
+        }
+        return TRUE;
+    }
+    if (app_data.session_was_inactive) {
+        app_data.session_was_inactive = FALSE;
+        g_message("Session is back in the foreground, re-detecting monitors");
+        if (app_data.recheck_timer_id > 0) {
+            g_source_remove(app_data.recheck_timer_id);
+        }
+        app_data.recheck_timer_id = g_timeout_add_seconds(1, recheck_monitors_immediately, NULL);
+        return TRUE;
+    }
+
     if (!app_data.current_monitor) {
         return TRUE;
     }
@@ -864,7 +1000,7 @@ static gboolean auto_brightness_timer_callback(gpointer data)
         for (int i = 0; i < monitor_list_get_count(app_data.monitors); i++) {
             Monitor *monitor = monitor_list_get_monitor(app_data.monitors, i);
             AutoBrightnessMode mode = config_get_monitor_auto_brightness_mode(app_data.config,
-                                                                              monitor_get_device_path(monitor));
+                                                                              monitor_get_config_key(monitor));
 
             int target_brightness = -1;
 
@@ -882,7 +1018,7 @@ static gboolean auto_brightness_timer_callback(gpointer data)
 
                         /* Get configured hysteresis for this monitor (default: 5.0 lux) */
                         double lux_hysteresis = config_get_light_sensor_hysteresis(app_data.config,
-                                                                                   monitor_get_device_path(monitor));
+                                                                                   monitor_get_config_key(monitor));
                         gboolean should_update = FALSE;
 
                         if (stable_lux < 0) {
@@ -920,7 +1056,7 @@ static gboolean auto_brightness_timer_callback(gpointer data)
 
                         /* Apply brightness offset */
                         int offset = config_get_monitor_brightness_offset(app_data.config,
-                                                                          monitor_get_device_path(monitor));
+                                                                          monitor_get_config_key(monitor));
                         target_brightness += offset;
 
                         /* Clamp to 0-100 range */
@@ -1220,6 +1356,8 @@ static MonitorList* filter_controllable_monitors(MonitorList *all_monitors)
                 monitor_set_model_name(filtered_monitor, monitor_get_model_name(monitor));
             if (monitor_get_drm_connector(monitor))
                 monitor_set_drm_connector(filtered_monitor, monitor_get_drm_connector(monitor));
+            if (strcmp(monitor_get_config_key(monitor), monitor_get_device_path(monitor)) != 0)
+                monitor_set_config_key(filtered_monitor, monitor_get_config_key(monitor));
 
             monitor_list_add(filtered, filtered_monitor);
             controllable_count++;
@@ -1236,6 +1374,8 @@ static MonitorList* filter_controllable_monitors(MonitorList *all_monitors)
  * search for a curve stored under a different bus that was previously used by the
  * same monitor model and copy it across.  This handles the case where a hub
  * reconnect causes the kernel to assign a new /dev/i2c-N number. */
+static void migrate_monitor_settings(void);
+
 static void migrate_monitor_curves(void)
 {
     if (!app_data.monitors || !app_data.config) return;
@@ -1249,6 +1389,9 @@ static void migrate_monitor_curves(void)
 
         const char *device_path = monitor_get_device_path(monitor);
         const char *model_name  = monitor_get_model_name(monitor);
+
+        /* Monitors with an EDID identity are handled by migrate_monitor_settings() */
+        if (strcmp(monitor_get_config_key(monitor), device_path) != 0) continue;
         if (!model_name || model_name[0] == '\0') continue;
 
         /* Always record the model name for the current bus so future calls can find it */
@@ -1302,9 +1445,90 @@ static void migrate_monitor_curves(void)
     }
 }
 
+/* Move settings stored under a monitor's old bus key (/dev/i2c-N) to its EDID key
+ * the first time it is seen with one, then drop the old keys so a different monitor
+ * later on the same bus doesn't inherit them. */
+static void migrate_monitor_settings(void)
+{
+    if (!app_data.monitors || !app_data.config) return;
+
+    GKeyFile *kf = config_get_keyfile(app_data.config);
+    gboolean changed = FALSE;
+
+    for (int i = 0; i < monitor_list_get_count(app_data.monitors); i++) {
+        Monitor *monitor = monitor_list_get_monitor(app_data.monitors, i);
+        const char *key = monitor_get_config_key(monitor);
+        const char *path = monitor_get_device_path(monitor);
+        if (!key || !path || strcmp(key, path) == 0) continue;
+
+        static const char *suffixes[] = { "_auto_brightness_mode", "_auto_brightness", "_brightness_offset" };
+
+        char *new_mode_key = g_strdup_printf("%s_auto_brightness_mode", key);
+        gboolean has_new = g_key_file_has_key(kf, "Monitors", new_mode_key, NULL);
+        g_free(new_mode_key);
+
+        gboolean has_old = FALSE;
+        for (gsize s = 0; s < G_N_ELEMENTS(suffixes); s++) {
+            char *old_key = g_strdup_printf("%s%s", path, suffixes[s]);
+            has_old |= g_key_file_has_key(kf, "Monitors", old_key, NULL);
+            g_free(old_key);
+        }
+
+        if (has_old) {
+            if (!has_new) {
+                config_set_monitor_auto_brightness_mode(app_data.config, key,
+                    config_get_monitor_auto_brightness_mode(app_data.config, path));
+                config_set_monitor_brightness_offset(app_data.config, key,
+                    config_get_monitor_brightness_offset(app_data.config, path));
+                g_message("Migrated monitor settings from %s to %s", path, key);
+            }
+            for (gsize s = 0; s < G_N_ELEMENTS(suffixes); s++) {
+                char *old_key = g_strdup_printf("%s%s", path, suffixes[s]);
+                g_key_file_remove_key(kf, "Monitors", old_key, NULL);
+                g_free(old_key);
+            }
+            changed = TRUE;
+        }
+
+        LightSensorCurvePoint *points = NULL;
+        int count = 0;
+        char *old_group = g_strdup_printf("LightSensorCurve_%s", path);
+        if (g_key_file_has_group(kf, old_group)) {
+            if (!config_load_light_sensor_curve(app_data.config, key, &points, &count) &&
+                config_load_light_sensor_curve(app_data.config, path, &points, &count)) {
+                config_save_light_sensor_curve(app_data.config, key, points, count);
+                config_set_light_sensor_hysteresis(app_data.config, key,
+                    config_get_light_sensor_hysteresis(app_data.config, path));
+                g_message("Migrated light sensor curve from %s to %s", path, key);
+            }
+            g_free(points);
+            g_key_file_remove_group(kf, old_group, NULL);
+            changed = TRUE;
+        }
+        g_free(old_group);
+
+        char *default_monitor = config_get_default_monitor(app_data.config);
+        if (default_monitor && strcmp(default_monitor, path) == 0) {
+            config_set_default_monitor(app_data.config, key);
+            changed = TRUE;
+        }
+        g_free(default_monitor);
+    }
+
+    if (changed) {
+        request_config_save();
+    }
+}
+
 /* Load available monitors */
 static void load_monitors(void)
 {
+    if (!session_is_active()) {
+        g_message("Session is not in the foreground, skipping monitor detection");
+        app_data.session_was_inactive = TRUE;
+        return;
+    }
+
     /* Clear existing monitors */
     if (app_data.monitors) {
         monitor_list_free(app_data.monitors);
@@ -1366,6 +1590,7 @@ static void load_monitors(void)
 
     /* Migrate any light sensor curves that moved to a new I2C bus */
     migrate_monitor_curves();
+    migrate_monitor_settings();
 
     /* Cancel any pending retry timer */
     if (app_data.monitor_retry_timer > 0) {
@@ -1383,11 +1608,13 @@ static void load_monitors(void)
         Monitor *monitor = monitor_list_get_monitor(app_data.monitors, i);
         const char *display_name = monitor_get_display_name(monitor);
         const char *device_path = monitor_get_device_path(monitor);
+        const char *config_key = monitor_get_config_key(monitor);
 
         gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(app_data.monitor_combo), display_name);
 
         /* Check if this is the previously selected monitor */
-        if (default_monitor && strcmp(device_path, default_monitor) == 0) {
+        if (default_monitor && (strcmp(config_key, default_monitor) == 0 ||
+                                strcmp(device_path, default_monitor) == 0)) {
             default_index = i;
         }
     }
@@ -1416,6 +1643,13 @@ static gboolean load_monitors_with_retry(gpointer data)
 
     /* Clear the timer ID since it's about to complete */
     app_data.monitor_retry_timer = 0;
+
+    if (!session_is_active()) {
+        g_message("Session is not in the foreground, skipping monitor detection retry");
+        app_data.session_was_inactive = TRUE;
+        app_data.monitor_retry_attempt = 0;
+        return FALSE;
+    }
 
     /* Try to detect monitors again */
     g_message("Retrying monitor detection (attempt %d)...", app_data.monitor_retry_attempt);
@@ -1508,6 +1742,7 @@ static gboolean load_monitors_with_retry(gpointer data)
 
     /* Migrate any light sensor curves that moved to a new I2C bus */
     migrate_monitor_curves();
+    migrate_monitor_settings();
 
     /* Populate combo box with controllable monitors only */
     char *default_monitor = config_get_default_monitor(app_data.config);
@@ -1517,11 +1752,13 @@ static gboolean load_monitors_with_retry(gpointer data)
         Monitor *monitor = monitor_list_get_monitor(app_data.monitors, i);
         const char *display_name = monitor_get_display_name(monitor);
         const char *device_path = monitor_get_device_path(monitor);
+        const char *config_key = monitor_get_config_key(monitor);
 
         gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(app_data.monitor_combo), display_name);
 
         /* Check if this is the previously selected monitor */
-        if (default_monitor && strcmp(device_path, default_monitor) == 0) {
+        if (default_monitor && (strcmp(config_key, default_monitor) == 0 ||
+                                strcmp(device_path, default_monitor) == 0)) {
             default_index = i;
         }
     }
@@ -1847,8 +2084,9 @@ static void set_brightness_from_indicator(int brightness)
     if (app_data.current_monitor) {
         /* Disable auto brightness and save config immediately */
         config_set_monitor_auto_brightness_mode(app_data.config,
-                                                monitor_get_device_path(app_data.current_monitor),
+                                                monitor_get_config_key(app_data.current_monitor),
                                                 AUTO_BRIGHTNESS_MODE_DISABLED);
+        request_config_save();
 
         monitor_set_brightness_with_retry(app_data.current_monitor, brightness, auto_refresh_monitors_on_failure);
         app_data.updating_from_auto = TRUE;
@@ -1925,7 +2163,7 @@ static gboolean deferred_mode_change_callback(gpointer user_data)
         /* Apply light sensor-based brightness immediately */
         if (light_sensor_is_available(app_data.light_sensor)) {
             /* Load the curve for this monitor */
-            load_light_sensor_curve_for_monitor(monitor_get_device_path(app_data.current_monitor), "user mode change");
+            load_light_sensor_curve_for_monitor(monitor_get_config_key(app_data.current_monitor), "user mode change");
 
             double lux = light_sensor_read_lux(app_data.light_sensor);
             if (lux >= 0) {
@@ -1945,7 +2183,7 @@ static gboolean deferred_mode_change_callback(gpointer user_data)
             if (laptop_brightness >= 0) {
                 /* Apply brightness offset */
                 int offset = config_get_monitor_brightness_offset(app_data.config,
-                                                                  monitor_get_device_path(app_data.current_monitor));
+                                                                  monitor_get_config_key(app_data.current_monitor));
                 new_brightness = laptop_brightness + offset;
 
                 /* Clamp to 0-100 range */
@@ -1982,8 +2220,9 @@ static void on_indicator_auto_schedule(GtkMenuItem *item, gpointer data)
     if (app_data.current_monitor) {
         /* Save config directly without triggering radio button callback */
         config_set_monitor_auto_brightness_mode(app_data.config,
-                                                monitor_get_device_path(app_data.current_monitor),
+                                                monitor_get_config_key(app_data.current_monitor),
                                                 AUTO_BRIGHTNESS_MODE_TIME_SCHEDULE);
+        request_config_save();
 
         /* Update radio button without triggering its callback (to prevent duplicate work) */
         g_signal_handlers_block_by_func(app_data.auto_brightness_schedule_radio,
@@ -2009,8 +2248,9 @@ static void on_indicator_auto_sensor(GtkMenuItem *item, gpointer data)
     if (app_data.current_monitor && light_sensor_is_available(app_data.light_sensor)) {
         /* Save config directly without triggering radio button callback */
         config_set_monitor_auto_brightness_mode(app_data.config,
-                                                monitor_get_device_path(app_data.current_monitor),
+                                                monitor_get_config_key(app_data.current_monitor),
                                                 AUTO_BRIGHTNESS_MODE_LIGHT_SENSOR);
+        request_config_save();
 
         /* Update radio button without triggering its callback (to prevent duplicate work) */
         g_signal_handlers_block_by_func(app_data.auto_brightness_sensor_radio,
@@ -2036,8 +2276,9 @@ static void on_indicator_auto_main_display(GtkMenuItem *item, gpointer data)
     if (app_data.current_monitor && laptop_backlight_is_available(app_data.laptop_backlight)) {
         /* Save config directly without triggering radio button callback */
         config_set_monitor_auto_brightness_mode(app_data.config,
-                                                monitor_get_device_path(app_data.current_monitor),
+                                                monitor_get_config_key(app_data.current_monitor),
                                                 AUTO_BRIGHTNESS_MODE_LAPTOP_DISPLAY);
+        request_config_save();
 
         /* Update radio button without triggering its callback (to prevent duplicate work) */
         g_signal_handlers_block_by_func(app_data.auto_brightness_laptop_radio,
@@ -2169,7 +2410,7 @@ static void update_indicator_menu(void)
     AutoBrightnessMode mode = AUTO_BRIGHTNESS_MODE_DISABLED;
     if (app_data.current_monitor) {
         mode = config_get_monitor_auto_brightness_mode(app_data.config,
-                                                       monitor_get_device_path(app_data.current_monitor));
+                                                       monitor_get_config_key(app_data.current_monitor));
     }
 
     /* Calculate brightness for each mode */
@@ -2190,7 +2431,7 @@ static void update_indicator_menu(void)
         if (laptop_brightness >= 0) {
             /* Apply brightness offset to get the actual target brightness */
             int offset = config_get_monitor_brightness_offset(app_data.config,
-                                                              monitor_get_device_path(app_data.current_monitor));
+                                                              monitor_get_config_key(app_data.current_monitor));
             main_display_brightness = laptop_brightness + offset;
 
             /* Clamp to 0-100 range */
@@ -2336,6 +2577,8 @@ static gboolean setup_udev_monitoring(void)
                                            on_udev_event, 
                                            NULL);
     
+    app_data.drm_connector_state = read_drm_connector_state();
+
     g_message("Udev monitoring setup successfully");
     return TRUE;
 }
@@ -2376,6 +2619,25 @@ static gboolean on_udev_event(GIOChannel *channel, GIOCondition condition, gpoin
             const char *subsystem = udev_device_get_subsystem(device);
             /* const char *devtype = udev_device_get_devtype(device); */ /* Not currently used */
             
+            /* A monitor plugged straight into the laptop only produces a DRM "change"
+             * event. Re-detect when a connector's status actually changed. */
+            if (action && strcmp(action, "change") == 0 && subsystem && strcmp(subsystem, "drm") == 0) {
+                char *state = read_drm_connector_state();
+                if (g_strcmp0(state, app_data.drm_connector_state) != 0) {
+                    g_message("Display connector status changed, will refresh monitors in %d seconds",
+                              UDEV_DEBOUNCE_ADD_SECONDS);
+                    g_free(app_data.drm_connector_state);
+                    app_data.drm_connector_state = state;
+                    if (app_data.recheck_timer_id > 0) {
+                        g_source_remove(app_data.recheck_timer_id);
+                    }
+                    app_data.recheck_timer_id = g_timeout_add_seconds(UDEV_DEBOUNCE_ADD_SECONDS,
+                                                                       recheck_monitors_immediately, NULL);
+                } else {
+                    g_free(state);
+                }
+            }
+
             /* Check for device addition/removal events that might affect display hardware */
             if (action && (strcmp(action, "add") == 0 || strcmp(action, "remove") == 0)) {
                 gboolean should_check_monitors = FALSE;
@@ -2555,12 +2817,12 @@ static gboolean on_laptop_backlight_change(GIOChannel *channel, GIOCondition con
         for (int i = 0; i < monitor_list_get_count(app_data.monitors); i++) {
             Monitor *monitor = monitor_list_get_monitor(app_data.monitors, i);
             AutoBrightnessMode mode = config_get_monitor_auto_brightness_mode(app_data.config,
-                                                                              monitor_get_device_path(monitor));
+                                                                              monitor_get_config_key(monitor));
 
             if (mode == AUTO_BRIGHTNESS_MODE_LAPTOP_DISPLAY) {
                 /* Apply brightness offset */
                 int offset = config_get_monitor_brightness_offset(app_data.config,
-                                                                  monitor_get_device_path(monitor));
+                                                                  monitor_get_config_key(monitor));
                 int target_brightness = current_brightness + offset;
 
                 /* Clamp to 0-100 range */
@@ -2623,6 +2885,11 @@ static gboolean post_resume_restore_brightness(gpointer data)
     (void)data;
 
     if (!app_data.power_manager || app_data.power_manager->system_suspended) {
+        return G_SOURCE_REMOVE;
+    }
+
+    if (!session_is_active()) {
+        g_message("Session is not in the foreground, skipping post-resume brightness restore");
         return G_SOURCE_REMOVE;
     }
 

@@ -45,6 +45,12 @@ void monitor_set_stable_lux(Monitor *monitor, double lux);
 const char* monitor_get_drm_connector(Monitor *monitor);
 void monitor_set_drm_connector(Monitor *monitor, const char *connector);
 
+/* Stable identity used to key per-monitor settings (built from EDID, e.g.
+ * "edid-SAM-U32J59x-H4ZMC00130"), so settings follow the monitor when its
+ * I2C bus number changes. Falls back to the device path when unknown. */
+const char* monitor_get_config_key(Monitor *monitor);
+void monitor_set_config_key(Monitor *monitor, const char *key);
+
 /* Enhanced functions with auto-refresh capability */
 typedef gboolean (*MonitorRefreshCallback)(void);
 int monitor_get_brightness_with_retry(Monitor *monitor, MonitorRefreshCallback refresh_callback);

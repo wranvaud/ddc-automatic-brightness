@@ -54,60 +54,125 @@ static char* find_drm_connector_for_i2c(int i2c_num)
     return connector_name;
 }
 
-/* Check if an i2c device corresponds to an internal display (eDP or LVDS) */
-static gboolean is_internal_display(const char *device_path)
+/* Extract the bus number from a device path such as "/dev/i2c-12". Returns -1 if none. */
+static int i2c_bus_number(const char *device_path)
 {
-    if (!device_path) {
-        return FALSE;
+    const char *dash = device_path ? strrchr(device_path, '-') : NULL;
+    if (!dash || !g_ascii_isdigit(dash[1])) return -1;
+    return atoi(dash + 1);
+}
+
+/* An internal display is one whose DRM connector is eDP or LVDS. Uses the exact
+ * bus match in find_drm_connector_for_i2c(), so i2c-1 can't match i2c-12. */
+static gboolean is_internal_connector(const char *connector)
+{
+    return connector && (strstr(connector, "-eDP-") || strstr(connector, "-LVDS-"));
+}
+
+/* Keep only characters that are safe in a GKeyFile key and a group name */
+static void sanitize_key_part(char *s)
+{
+    for (; *s; s++) {
+        if (!g_ascii_isalnum(*s) && *s != '.' && *s != '_') *s = '_';
     }
+}
 
-    /* Extract i2c bus number from device path (e.g., "/dev/i2c-12" -> "12") */
-    const char *dash = strrchr(device_path, '-');
-    if (!dash) {
-        return FALSE;
-    }
+/* Read the EDID of a DRM connector and build a stable identity for the monitor.
+ * key:  "edid-<maker>-<model name or product code>-<serial>" (always set on success)
+ * name: the monitor name from the EDID, e.g. "U32J59x" (NULL if the EDID has none)
+ * Returns FALSE if no EDID could be read. Caller frees both strings. */
+static gboolean read_edid_identity(const char *connector, char **key, char **name)
+{
+    *key = NULL;
+    *name = NULL;
+    if (!connector) return FALSE;
 
-    int i2c_num = atoi(dash + 1);
-
-    /* Look for DRM connector associated with this i2c device */
-    DIR *drm_dir = opendir("/sys/class/drm");
-    if (!drm_dir) {
-        return FALSE;
-    }
-
-    gboolean is_internal = FALSE;
-    struct dirent *entry;
     char path[PATH_MAX];
-    char link_target[PATH_MAX];
+    snprintf(path, sizeof(path), "/sys/class/drm/%s/edid", connector);
 
-    while ((entry = readdir(drm_dir)) != NULL) {
-        /* Look for card*-eDP-* or card*-LVDS-* entries */
-        if (strstr(entry->d_name, "card") &&
-            (strstr(entry->d_name, "-eDP-") || strstr(entry->d_name, "-LVDS-"))) {
+    guchar edid[128];
+    FILE *f = fopen(path, "rb");
+    if (!f) return FALSE;
+    size_t n = fread(edid, 1, sizeof(edid), f);
+    fclose(f);
 
-            /* Check if this connector has a DDC/i2c device matching our number */
-            snprintf(path, sizeof(path), "/sys/class/drm/%s/ddc", entry->d_name);
+    static const guchar header[8] = {0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00};
+    if (n < sizeof(edid) || memcmp(edid, header, sizeof(header)) != 0) return FALSE;
 
-            ssize_t len = readlink(path, link_target, sizeof(link_target) - 1);
-            if (len > 0) {
-                link_target[len] = '\0';
+    /* Manufacturer: three 5-bit letters packed big-endian in bytes 8-9 */
+    guint16 m = (guint16)((edid[8] << 8) | edid[9]);
+    char maker[4] = {
+        (char)('@' + ((m >> 10) & 0x1F)),
+        (char)('@' + ((m >> 5) & 0x1F)),
+        (char)('@' + (m & 0x1F)),
+        '\0'
+    };
+    guint16 product = (guint16)(edid[10] | (edid[11] << 8));
+    guint32 serial_num = (guint32)edid[12] | ((guint32)edid[13] << 8) |
+                         ((guint32)edid[14] << 16) | ((guint32)edid[15] << 24);
 
-                /* Check if the symlink contains our i2c number */
-                char i2c_pattern[32];
-                snprintf(i2c_pattern, sizeof(i2c_pattern), "i2c-%d", i2c_num);
-
-                if (strstr(link_target, i2c_pattern)) {
-                    is_internal = TRUE;
-                    g_message("Detected internal display: %s via DRM connector %s",
-                             device_path, entry->d_name);
-                    break;
-                }
-            }
-        }
+    /* Descriptor blocks: 0xFC = monitor name, 0xFF = serial number string */
+    char model[14] = "", serial[14] = "";
+    for (int off = 54; off <= 108; off += 18) {
+        const guchar *d = edid + off;
+        if (d[0] != 0 || d[1] != 0 || (d[3] != 0xFC && d[3] != 0xFF)) continue;
+        char *dst = (d[3] == 0xFC) ? model : serial;
+        memcpy(dst, d + 5, 13);
+        dst[13] = '\0';
+        char *nl = strchr(dst, '\n');
+        if (nl) *nl = '\0';
+        g_strstrip(dst);
     }
 
-    closedir(drm_dir);
-    return is_internal;
+    char *model_part = model[0] ? g_strdup(model) : g_strdup_printf("%04X", product);
+    char *serial_part = serial[0] ? g_strdup(serial) : g_strdup_printf("%u", serial_num);
+    sanitize_key_part(model_part);
+    sanitize_key_part(serial_part);
+    sanitize_key_part(maker);
+
+    *key = g_strdup_printf("edid-%s-%s-%s", maker, model_part, serial_part);
+    if (model[0]) *name = g_strdup(model);
+
+    g_free(model_part);
+    g_free(serial_part);
+    return TRUE;
+}
+
+/* Build a Monitor for a ddccontrol-detected device and add it to the list */
+static void add_detected_monitor(MonitorList *list, const char *device_path, const char *ddc_name)
+{
+    int bus = i2c_bus_number(device_path);
+    char *connector = bus >= 0 ? find_drm_connector_for_i2c(bus) : NULL;
+    gboolean is_internal = is_internal_connector(connector);
+    if (is_internal) {
+        g_message("Detected internal display: %s via DRM connector %s", device_path, connector);
+    }
+
+    /* Prefer the EDID name: right after a resume ddccontrol often can't identify
+     * the monitor yet and reports a generic "VESA standard monitor". */
+    char *edid_key = NULL, *edid_name = NULL;
+    read_edid_identity(connector, &edid_key, &edid_name);
+
+    const char *name = edid_name ? edid_name : (ddc_name && ddc_name[0] ? ddc_name : NULL);
+    const char *type_label = is_internal ? "Internal" : "External";
+    char *display_name = name
+        ? g_strdup_printf("%s (%s - %s)", name, type_label, device_path)
+        : g_strdup_printf("Monitor (%s - %s)", type_label, device_path);
+
+    Monitor *monitor = monitor_new(device_path, display_name);
+    monitor_set_internal(monitor, is_internal);
+    if (name) monitor_set_model_name(monitor, name);
+    if (connector) monitor_set_drm_connector(monitor, connector);
+    if (edid_key) monitor_set_config_key(monitor, edid_key);
+
+    monitor_list_add(list, monitor);
+    g_message("Found monitor: %s (%s, %s)", device_path, type_label,
+              edid_key ? edid_key : "no EDID identity");
+
+    g_free(display_name);
+    g_free(edid_key);
+    g_free(edid_name);
+    g_free(connector);
 }
 
 /* Comparator function for sorting monitors - external monitors first */
@@ -177,38 +242,7 @@ MonitorList* monitor_detect_all(void)
         if (regexec(&device_regex, line, 3, matches, 0) == 0) {
             /* If we have a previous monitor with DDC support, add it */
             if (strlen(current_device) > 0 && ddc_supported) {
-                /* Check if this is an internal display */
-                gboolean is_internal = is_internal_display(current_device);
-
-                /* Create display name with Internal/External label */
-                char display_name[256];
-                const char *type_label = is_internal ? "Internal" : "External";
-
-                if (strlen(current_name) > 0) {
-                    snprintf(display_name, sizeof(display_name), "%s (%s - %s)",
-                            current_name, type_label, current_device);
-                } else {
-                    snprintf(display_name, sizeof(display_name), "Monitor (%s - %s)",
-                            type_label, current_device);
-                }
-
-                Monitor *monitor = monitor_new(current_device, display_name);
-                monitor_set_internal(monitor, is_internal);
-                if (strlen(current_name) > 0)
-                    monitor_set_model_name(monitor, current_name);
-
-                /* Store DRM connector path for fast link-status pre-checks */
-                const char *d = strrchr(current_device, '-');
-                if (d) {
-                    char *drm_conn = find_drm_connector_for_i2c(atoi(d + 1));
-                    if (drm_conn) {
-                        monitor_set_drm_connector(monitor, drm_conn);
-                        g_free(drm_conn);
-                    }
-                }
-
-                monitor_list_add(list, monitor);
-                g_message("Found monitor: %s (%s)", current_device, type_label);
+                add_detected_monitor(list, current_device, current_name);
             }
             
             /* Extract new device path */
@@ -238,38 +272,7 @@ MonitorList* monitor_detect_all(void)
     
     /* Add the last monitor if it has DDC support */
     if (strlen(current_device) > 0 && ddc_supported) {
-        /* Check if this is an internal display */
-        gboolean is_internal = is_internal_display(current_device);
-
-        /* Create display name with Internal/External label */
-        char display_name[256];
-        const char *type_label = is_internal ? "Internal" : "External";
-
-        if (strlen(current_name) > 0) {
-            snprintf(display_name, sizeof(display_name), "%s (%s - %s)",
-                    current_name, type_label, current_device);
-        } else {
-            snprintf(display_name, sizeof(display_name), "Monitor (%s - %s)",
-                    type_label, current_device);
-        }
-
-        Monitor *monitor = monitor_new(current_device, display_name);
-        monitor_set_internal(monitor, is_internal);
-        if (strlen(current_name) > 0)
-            monitor_set_model_name(monitor, current_name);
-
-        /* Store DRM connector path for fast link-status pre-checks */
-        const char *d = strrchr(current_device, '-');
-        if (d) {
-            char *drm_conn = find_drm_connector_for_i2c(atoi(d + 1));
-            if (drm_conn) {
-                monitor_set_drm_connector(monitor, drm_conn);
-                g_free(drm_conn);
-            }
-        }
-
-        monitor_list_add(list, monitor);
-        g_message("Found monitor: %s (%s)", current_device, type_label);
+        add_detected_monitor(list, current_device, current_name);
     }
     
     regfree(&device_regex);

@@ -41,6 +41,7 @@ struct _Monitor {
     char *display_name;
     char *model_name;         /* Raw model name from ddccontrol (e.g. "Samsung standard LCD") */
     char *drm_connector;      /* DRM sysfs name (e.g. "card1-DP-1"), NULL if unknown */
+    char *config_key;         /* Stable EDID-based settings key, NULL if unknown */
     gboolean available;
     gboolean is_internal;
     int current_brightness;  /* Last brightness value actually sent to monitor (-1 = unknown) */
@@ -63,6 +64,7 @@ Monitor* monitor_new(const char *device_path, const char *name)
     monitor->display_name = g_strdup(name ? name : device_path);
     monitor->model_name = NULL;
     monitor->drm_connector = NULL;
+    monitor->config_key = NULL;
     monitor->available = TRUE;
     monitor->is_internal = FALSE;  /* Will be set during detection */
     monitor->current_brightness = -1;  /* Unknown initial brightness */
@@ -82,6 +84,7 @@ void monitor_free(Monitor *monitor)
         g_free(monitor->display_name);
         g_free(monitor->model_name);
         g_free(monitor->drm_connector);
+        g_free(monitor->config_key);
         g_free(monitor);
     }
 }
@@ -124,6 +127,21 @@ void monitor_set_drm_connector(Monitor *monitor, const char *connector)
     if (!monitor) return;
     g_free(monitor->drm_connector);
     monitor->drm_connector = connector ? g_strdup(connector) : NULL;
+}
+
+/* Get the settings key: EDID identity when known, otherwise the device path */
+const char* monitor_get_config_key(Monitor *monitor)
+{
+    if (!monitor) return NULL;
+    return monitor->config_key ? monitor->config_key : monitor->device_path;
+}
+
+/* Set the EDID-based settings key */
+void monitor_set_config_key(Monitor *monitor, const char *key)
+{
+    if (!monitor) return;
+    g_free(monitor->config_key);
+    monitor->config_key = key ? g_strdup(key) : NULL;
 }
 
 /* Check if this monitor is currently backing off DDC calls after repeated failures */
